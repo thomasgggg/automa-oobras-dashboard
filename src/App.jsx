@@ -245,12 +245,16 @@ export default function CanteiroDashboard() {
 
       let empresaId;
       if (authMode === "criar") {
-        const [novaEmpresa] = await sb({ access_token: accessToken }, "empresas", {
+        // Não pedimos o registro de volta (return=representation) aqui: logo após
+        // o INSERT ainda não existe um perfil ligando este usuário à empresa, então
+        // a política de SELECT bloquearia o RETURNING e a operação toda falharia
+        // com "row-level security policy". Geramos o id no navegador e seguimos.
+        empresaId = crypto.randomUUID();
+        await sb({ access_token: accessToken }, "empresas", {
           method: "POST",
-          headers: { Prefer: "return=representation" },
-          body: JSON.stringify({ nome: authForm.empresaNome.trim() }),
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({ id: empresaId, nome: authForm.empresaNome.trim() }),
         });
-        empresaId = novaEmpresa.id;
       } else {
         empresaId = authForm.codigoEmpresa.trim();
       }
