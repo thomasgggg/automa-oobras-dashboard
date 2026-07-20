@@ -53,6 +53,10 @@ function formatDateBR(iso) {
   const [y, m, d] = iso.split("-");
   return `${d}/${m}/${y}`;
 }
+function formatDateAnyBR(iso) {
+  if (!iso) return "";
+  return formatDateBR(String(iso).slice(0, 10));
+}
 function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }
@@ -784,7 +788,7 @@ export default function CanteiroDashboard() {
                             <div style={{ flex: 1 }}>
                               <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                                 <span style={{ fontSize: 13, fontWeight: 700, textTransform: "capitalize" }}>{item.titulo}</span>
-                                <span style={{ fontSize: 11, color: COLORS.inkMuted }}>{item.data ? new Date(item.data).toLocaleDateString("pt-BR") : ""}</span>
+                                <span style={{ fontSize: 11, color: COLORS.inkMuted }}>{item.data ? formatDateAnyBR(item.data) : ""}</span>
                               </div>
                               {item.subtitulo && <p style={{ margin: "4px 0 0", fontSize: 13, color: COLORS.inkMuted }}>{item.subtitulo}</p>}
                               {item.valor != null && <p style={{ margin: "4px 0 0", fontSize: 13, fontWeight: 700 }}>{formatBRL(item.valor)}</p>}
@@ -813,7 +817,7 @@ export default function CanteiroDashboard() {
                           <div style={{ flex: 1 }}>
                             <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                               <Badge label={r.tipo.replace("_", " ")} tone={r.tipo === "nota_fiscal" ? COLORS.green : COLORS.amber} />
-                              <span style={{ fontSize: 11, color: COLORS.inkMuted }}>{new Date(r.criadoEm).toLocaleDateString("pt-BR")}</span>
+                              <span style={{ fontSize: 11, color: COLORS.inkMuted }}>{formatDateAnyBR(r.criadoEm)}</span>
                             </div>
                             {r.conteudo && <p style={{ margin: "6px 0 0", fontSize: 13, color: COLORS.inkMuted }}>{r.conteudo}</p>}
                             {r.valor != null && <p style={{ margin: "4px 0 0", fontSize: 13, fontWeight: 700 }}>{formatBRL(r.valor)}</p>}
@@ -844,7 +848,7 @@ export default function CanteiroDashboard() {
                               <Camera size={22} color={COLORS.inkMuted} />
                             </div>
                           )}
-                          <p style={{ margin: 0, padding: "8px 10px", fontSize: 11, color: COLORS.inkMuted }}>{new Date(r.criadoEm).toLocaleDateString("pt-BR")}</p>
+                          <p style={{ margin: 0, padding: "8px 10px", fontSize: 11, color: COLORS.inkMuted }}>{formatDateAnyBR(r.criadoEm)}</p>
                         </a>
                       ))}
                     </div>
