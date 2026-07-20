@@ -45,6 +45,9 @@ function formatBRL(v) {
   const n = Number(v) || 0;
   return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
+function formatOrcamento(v) {
+  return v ? formatBRL(v) : "sem orçamento definido";
+}
 function formatDateBR(iso) {
   if (!iso) return "—";
   const [y, m, d] = iso.split("-");
@@ -81,7 +84,9 @@ async function sb(session, path, options = {}) {
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    throw new Error(errText || `Erro ${res.status}`);
+    const err = new Error(errText || `Erro ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
   const text = await res.text();
   return text ? JSON.parse(text) : null;
@@ -222,7 +227,7 @@ export default function CanteiroDashboard() {
 
   async function loadRegistros(obraId) {
     try {
-      const rows = await sb(session, `registros?obra_id=eq.${obraId}&order=criado_em.desc`);
+      const rows = await call(`registros?obra_id=eq.${obraId}&order=criado_em.desc`);
       setRegistros(
         (rows || []).map((r) => ({
           id: r.id,
@@ -321,12 +326,42 @@ export default function CanteiroDashboard() {
     setShowEmpresaInfo(false);
   }
 
+  // O token de acesso do Supabase expira depois de um tempo (ex.: 1h). Sem isso,
+  // qualquer uso do painel além desse tempo passava a falhar com "JWT expired" —
+  // inclusive dando a impressão de que uma obra cadastrada "sumiu" ao dar F5,
+  // quando na verdade ela continuava salva, só a leitura é que falhava.
+  async function renovarSessao(atual) {
+    const data = await authRequest("token?grant_type=refresh_token", { refresh_token: atual.refresh_token });
+    const nova = { ...atual, access_token: data.access_token, refresh_token: data.refresh_token };
+    persistSession(nova);
+    return nova;
+  }
+
+  // Chamada autenticada ao banco que renova a sessão sozinha e repete a
+  // requisição uma vez, caso o token tenha expirado no meio do uso.
+  async function call(path, options = {}) {
+    try {
+      return await sb(session, path, options);
+    } catch (e) {
+      if (e.status === 401 && session?.refresh_token) {
+        try {
+          const novaSessao = await renovarSessao(session);
+          return await sb(novaSessao, path, options);
+        } catch (e2) {
+          logout();
+          throw new Error("Sua sessão expirou. Faça login novamente.");
+        }
+      }
+      throw e;
+    }
+  }
+
   async function loadData() {
     setSyncing(true);
     setError("");
     try {
-      const rawObras = await sb(session, "obras?select=*&order=start_date.desc");
-      const rawEntries = await sb(session, "materiais?select=*");
+      const rawObras = await call("obras?select=*&order=start_date.desc");
+      const rawEntries = await call("materiais?select=*");
       setObras(
         rawObras.map((o) => ({ id: o.id, name: o.name, budget: Number(o.budget), deadline: o.deadline, startDate: o.start_date, progress: o.progress }))
       );
@@ -334,7 +369,7 @@ export default function CanteiroDashboard() {
         rawEntries.map((e) => ({ id: e.id, obraId: e.obra_id, material: e.material, quantity: e.quantity, unit: e.unit, value: Number(e.value), date: e.date, stage: e.stage }))
       );
     } catch (e) {
-      setError(`Não consegui conectar no banco: ${e.message || "erro desconhecido"}`);
+      setError(e.message || "Não consegui conectar no banco.");
     }
     setSyncing(false);
   }
@@ -354,15 +389,16 @@ export default function CanteiroDashboard() {
   const emRisco = obras.filter((o) => stats[o.id]?.status.key === "risco").length;
 
   async function addObra() {
-    if (!obraForm.name.trim() || !obraForm.budget) return;
-    const obra = { id: uid(), empresa_id: session.empresa.id, name: obraForm.name.trim(), budget: Number(obraForm.budget), deadline: obraForm.deadline || null, telefone: obraForm.telefone.trim() || null, start_date: new Date().toISOString().slice(0, 10), progress: 0 };
+    // Orçamento é opcional — muita gente começa a obra sem ter um valor fechado ainda.
+    if (!obraForm.name.trim()) return;
+    const obra = { id: uid(), empresa_id: session.empresa.id, name: obraForm.name.trim(), budget: obraForm.budget ? Number(obraForm.budget) : 0, deadline: obraForm.deadline || null, telefone: obraForm.telefone.trim() || null, start_date: new Date().toISOString().slice(0, 10), progress: 0 };
     try {
-      await sb(session, "obras", { method: "POST", body: JSON.stringify(obra) });
+      await call("obras", { method: "POST", body: JSON.stringify(obra) });
       setObraForm({ name: "", budget: "", deadline: "", telefone: "" });
       setShowAddObra(false);
       loadData();
     } catch (e) {
-      setError("Não consegui salvar a obra no banco.");
+      setError(e.message || "Não consegui salvar a obra no banco.");
     }
   }
 
@@ -370,41 +406,41 @@ export default function CanteiroDashboard() {
     if (!entryForm.material.trim() || !entryForm.value) return;
     const entry = { id: uid(), obra_id: selectedId, material: entryForm.material.trim(), quantity: entryForm.quantity, unit: entryForm.unit, value: Number(entryForm.value), date: entryForm.date, stage: entryForm.stage };
     try {
-      await sb(session, "materiais", { method: "POST", body: JSON.stringify(entry) });
+      await call("materiais", { method: "POST", body: JSON.stringify(entry) });
       setEntryForm({ material: "", quantity: "", unit: "un", value: "", date: new Date().toISOString().slice(0, 10), stage: STAGES[0] });
       setShowAddEntry(false);
       loadData();
     } catch (e) {
-      setError("Não consegui salvar o lançamento no banco.");
+      setError(e.message || "Não consegui salvar o lançamento no banco.");
     }
   }
 
   async function updateProgress(id, value) {
     setObras(obras.map((o) => (o.id === id ? { ...o, progress: value } : o)));
     try {
-      await sb(session, `obras?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ progress: value }) });
+      await call(`obras?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ progress: value }) });
     } catch (e) {
-      setError("Não consegui atualizar o progresso no banco.");
+      setError(e.message || "Não consegui atualizar o progresso no banco.");
     }
   }
 
   async function deleteEntry(id) {
     try {
-      await sb(session, `materiais?id=eq.${id}`, { method: "DELETE" });
+      await call(`materiais?id=eq.${id}`, { method: "DELETE" });
       loadData();
     } catch (e) {
-      setError("Não consegui excluir o lançamento.");
+      setError(e.message || "Não consegui excluir o lançamento.");
     }
   }
 
   async function deleteObra(id) {
     try {
-      await sb(session, `materiais?obra_id=eq.${id}`, { method: "DELETE" });
-      await sb(session, `obras?id=eq.${id}`, { method: "DELETE" });
+      await call(`materiais?obra_id=eq.${id}`, { method: "DELETE" });
+      await call(`obras?id=eq.${id}`, { method: "DELETE" });
       setView("overview");
       loadData();
     } catch (e) {
-      setError("Não consegui excluir a obra.");
+      setError(e.message || "Não consegui excluir a obra.");
     }
   }
 
@@ -575,7 +611,7 @@ export default function CanteiroDashboard() {
             <div style={{ border: `1px dashed ${COLORS.line}`, background: COLORS.panel, borderRadius: 16, padding: 40, textAlign: "center" }}>
               <Building2 size={28} color={COLORS.inkMuted} style={{ marginBottom: 12 }} />
               <p style={{ fontFamily: "'Inter', sans-serif", fontSize: 16, fontWeight: 700, margin: "0 0 6px" }}>Cadastre sua primeira obra</p>
-              <p style={{ color: COLORS.inkMuted, fontSize: 13, margin: "0 0 16px" }}>Defina o orçamento e o prazo para começar a registrar os materiais.</p>
+              <p style={{ color: COLORS.inkMuted, fontSize: 13, margin: "0 0 16px" }}>Só o nome já basta para começar — orçamento e prazo são opcionais.</p>
               <button style={btnPrimary} onClick={() => setShowAddObra(true)}><Plus size={16} /> Nova obra</button>
             </div>
           ) : (
@@ -587,7 +623,7 @@ export default function CanteiroDashboard() {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                       <div>
                         <p style={{ fontFamily: "'Inter', sans-serif", fontSize: 15, fontWeight: 700, margin: 0 }}>{o.name}</p>
-                        <p style={{ color: COLORS.inkMuted, fontSize: 12, margin: "4px 0 0" }}>{formatBRL(o.budget)} orçado · prazo {formatDateBR(o.deadline)}</p>
+                        <p style={{ color: COLORS.inkMuted, fontSize: 12, margin: "4px 0 0" }}>{o.budget ? `${formatBRL(o.budget)} orçado` : "sem orçamento definido"} · prazo {formatDateBR(o.deadline)}</p>
                       </div>
                       <Badge label={s.status.label} tone={s.status.tone} />
                     </div>
@@ -644,7 +680,7 @@ export default function CanteiroDashboard() {
                   <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginTop: 20 }}>
                     <div>
                       <p style={{ color: COLORS.inkMuted, fontSize: 11, margin: 0 }}>orçado</p>
-                      <p style={{ fontSize: 17, fontWeight: 700, margin: "2px 0 0" }}>{formatBRL(selectedObra.budget)}</p>
+                      <p style={{ fontSize: 17, fontWeight: 700, margin: "2px 0 0" }}>{formatOrcamento(selectedObra.budget)}</p>
                     </div>
                     <div>
                       <p style={{ color: COLORS.inkMuted, fontSize: 11, margin: 0 }}>gasto</p>
@@ -865,8 +901,8 @@ export default function CanteiroDashboard() {
               <input style={inputStyle} placeholder="Casa Rua das Flores" value={obraForm.name} onChange={(e) => setObraForm({ ...obraForm, name: e.target.value })} />
             </div>
             <div>
-              <label style={labelStyle}>Orçamento planejado (R$)</label>
-              <input style={inputStyle} type="number" placeholder="150000" value={obraForm.budget} onChange={(e) => setObraForm({ ...obraForm, budget: e.target.value })} />
+              <label style={labelStyle}>Orçamento planejado (R$) · opcional</label>
+              <input style={inputStyle} type="number" placeholder="deixe em branco se ainda não tiver um valor fechado" value={obraForm.budget} onChange={(e) => setObraForm({ ...obraForm, budget: e.target.value })} />
             </div>
             <div>
               <label style={labelStyle}>Prazo de entrega</label>
