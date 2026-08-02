@@ -61,6 +61,42 @@ async function obraAindaValida(sessao) {
   return horas < SESSAO_VALIDA_HORAS;
 }
 
+// Descobre a que empresa este número de WhatsApp pertence e devolve só as
+// obras dessa empresa. Sem isso, a busca de obra por nome (encontrarObraNoTexto)
+// varreria o banco inteiro e poderia associar um registro de um cliente a uma
+// obra de outro cliente — ou expor o nome das obras de todo mundo na resposta.
+//
+// Duas fontes, nessa ordem:
+//   1. Sessão recente e válida: já sabemos a obra (e portanto a empresa) da
+//      última interação desse número.
+//   2. Telefone cadastrado como "WhatsApp do responsável" em alguma obra:
+//      é o único vínculo confiável entre um número e uma empresa que existe
+//      hoje no cadastro.
+// Se nenhuma das duas resolver, devolvemos lista vazia — nunca uma lista
+// global — e quem chamou decide como responder com segurança.
+async function obrasNoEscopoDoTelefone(telefone, sessao) {
+  if (await obraAindaValida(sessao)) {
+    const [obraDaSessao] = await sbAdmin(`obras?id=eq.${sessao.obra_id}&select=id,name,telefone,empresa_id`);
+    if (obraDaSessao && obraDaSessao.empresa_id) {
+      return sbAdmin(`obras?empresa_id=eq.${obraDaSessao.empresa_id}&select=id,name,telefone`);
+    }
+  }
+
+  const porTelefone = await sbAdmin(`obras?telefone=eq.${encodeURIComponent(telefone)}&select=id,name,telefone,empresa_id`);
+  if (!porTelefone || porTelefone.length === 0) return [];
+
+  const empresaIds = [...new Set(porTelefone.map((o) => o.empresa_id).filter(Boolean))];
+  if (empresaIds.length === 1) {
+    // Um único vínculo claro: abre para todas as obras dessa empresa (o
+    // responsável de uma obra também pode lançar em outra obra da mesma empresa).
+    return sbAdmin(`obras?empresa_id=eq.${empresaIds[0]}&select=id,name,telefone`);
+  }
+  // Esse número está cadastrado como responsável em mais de uma empresa ao
+  // mesmo tempo (raro, mas possível). Para não misturar as duas, ficamos
+  // restritos só às obras onde ele já está explicitamente cadastrado.
+  return porTelefone;
+}
+
 async function resumoDaObra(obra) {
   const registros = await sbAdmin(
     `registros?obra_id=eq.${obra.id}&select=tipo,valor`
@@ -107,8 +143,19 @@ export default async function handler(req, res) {
     );
     if (jaExiste && jaExiste.length > 0) return res.status(200).send("duplicado");
 
-    const obras = await sbAdmin("obras?select=id,name,telefone");
     const sessao = await getSessao(telefone);
+
+    // Isolamento por empresa: o webhook usa a service_role key, que ignora RLS,
+    // então a separação entre empresas precisa ser feita aqui manualmente.
+    // Nunca buscamos/mostramos obras de outras empresas para este número.
+    const obras = await obrasNoEscopoDoTelefone(telefone, sessao);
+    if (obras.length === 0) {
+      await sendText(
+        telefone,
+        "Não consegui identificar a qual obra/empresa este número pertence. Peça para quem cadastrou a obra no painel incluir este WhatsApp no campo \"WhatsApp do responsável\"."
+      );
+      return res.status(200).send("numero nao identificado");
+    }
 
     let conteudo = "";
     let mediaId = null;
