@@ -5,17 +5,55 @@
 // Configure a URL deste arquivo (https://SEU-SITE.vercel.app/api/whatsapp-webhook)
 // em developers.facebook.com > seu app > WhatsApp > Configuration > Webhook.
 
+import crypto from "crypto";
 import { sbAdmin, uploadMedia } from "./_lib/supabaseAdmin.js";
 import { downloadMedia, sendText } from "./_lib/whatsapp.js";
 
 const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
+const APP_SECRET = process.env.META_APP_SECRET;
 const SESSAO_VALIDA_HORAS = 6; // por quanto tempo lembramos a última obra usada
+
+// A Vercel parseia o corpo como JSON por padrão, mas para validar a
+// assinatura da Meta (HMAC sobre os bytes originais) precisamos do corpo
+// bruto, byte a byte, antes de qualquer parsing.
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+async function lerCorpoBruto(req) {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// Confirma que o payload realmente veio da Meta (e não de qualquer um que
+// descobriu a URL do webhook), comparando a assinatura HMAC-SHA256 enviada
+// no cabeçalho x-hub-signature-256 com uma calculada aqui usando o App
+// Secret. Sem isso, qualquer pessoa poderia forjar mensagens de WhatsApp
+// falsas e gerar registros/gastos falsos nas obras.
+function assinaturaValida(rawBody, assinaturaRecebida) {
+  if (!APP_SECRET) {
+    console.error("META_APP_SECRET não configurado: recusando webhook por segurança.");
+    return false;
+  }
+  if (!assinaturaRecebida) return false;
+  const esperado =
+    "sha256=" + crypto.createHmac("sha256", APP_SECRET).update(rawBody).digest("hex");
+  const a = Buffer.from(esperado);
+  const b = Buffer.from(assinaturaRecebida);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
 
 function normalizar(str) {
   return (str || "")
     .toLowerCase()
     .normalize("NFD")
-    .replace(new RegExp("[̀-ͯ]", "g"), "");
+    .replace(/\p{Diacritic}/gu, "");
 }
 
 function encontrarObraNoTexto(texto, obras) {
@@ -127,8 +165,22 @@ export default async function handler(req, res) {
     return res.status(405).send("Método não permitido.");
   }
 
+  const rawBody = await lerCorpoBruto(req);
+  const assinaturaRecebida = req.headers["x-hub-signature-256"];
+  if (!assinaturaValida(rawBody, assinaturaRecebida)) {
+    console.error("Webhook recusado: assinatura x-hub-signature-256 ausente ou inválida.");
+    return res.status(401).send("assinatura invalida");
+  }
+
+  let body;
   try {
-    const value = req.body?.entry?.[0]?.changes?.[0]?.value;
+    body = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {};
+  } catch (e) {
+    return res.status(400).send("payload invalido");
+  }
+
+  try {
+    const value = body?.entry?.[0]?.changes?.[0]?.value;
     const mensagem = value?.messages?.[0];
 
     // Eventos de status (entregue/lido) não têm "messages" — apenas confirme recebimento.
