@@ -34,7 +34,11 @@ async function sbAdmin(path, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-// Upload de um arquivo binário para o Storage (bucket "registros-media").
+// Upload de um arquivo binário para o Storage (bucket privado "registros-media").
+// Devolve só o caminho dentro do bucket (não uma URL pública): o bucket não é
+// público, então quem quiser ver o arquivo precisa passar por /api/media-url,
+// que confere se a pessoa pertence à empresa dona da obra antes de gerar um
+// link temporário assinado.
 async function uploadMedia(fileName, buffer, contentType) {
   assertConfig();
   const path = `${Date.now()}-${fileName}`;
@@ -54,7 +58,7 @@ async function uploadMedia(fileName, buffer, contentType) {
     const errText = await res.text().catch(() => "");
     throw new Error(errText || `Supabase storage erro ${res.status}`);
   }
-  return `${SUPABASE_URL.replace(/\/$/, "")}/storage/v1/object/public/registros-media/${path}`;
+  return path;
 }
 
 export { sbAdmin, uploadMedia };
