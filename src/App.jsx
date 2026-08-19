@@ -190,6 +190,76 @@ const btnGhost = { background: COLORS.panel, color: COLORS.ink, border: `1px sol
 const btnIcon = { background: COLORS.panel2, border: `1px solid ${COLORS.line}`, borderRadius: 999, color: COLORS.inkMuted, cursor: "pointer", padding: 8, display: "inline-flex" };
 const tabBtn = (active) => ({ background: active ? COLORS.black : "transparent", color: active ? "#fff" : COLORS.inkMuted, border: `1px solid ${active ? COLORS.black : COLORS.line}`, borderRadius: 999, padding: "8px 14px", fontSize: 13, fontWeight: 600, fontFamily: "'Inter', sans-serif", cursor: "pointer", flex: 1 });
 
+// O bucket de fotos/documentos (registros-media) é privado — r.mediaUrl guarda
+// só o caminho interno do arquivo, não uma URL utilizável direto no navegador.
+// Este hook pede um link temporário assinado para /api/media-url, que só
+// devolve o link se o usuário logado tiver permissão (RLS) para ver esse
+// registro, ou seja, se for da mesma empresa da obra.
+function useSignedMediaUrl(registro, session) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let cancelado = false;
+    setUrl(null);
+    if (!registro?.mediaUrl || !session?.access_token) return;
+    (async () => {
+      try {
+        const res = await fetch(`/api/media-url?registro_id=${encodeURIComponent(registro.id)}`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelado) setUrl(data.url);
+      } catch (e) {}
+    })();
+    return () => {
+      cancelado = true;
+    };
+  }, [registro?.id, registro?.mediaUrl, session?.access_token]);
+  return url;
+}
+
+function DocumentoLink({ r, session }) {
+  const url = useSignedMediaUrl(r, session);
+  if (!r.mediaUrl) return null;
+  return (
+    <a
+      href={url || undefined}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => {
+        if (!url) e.preventDefault();
+      }}
+      style={{ fontSize: 12, color: COLORS.green, fontWeight: 600, cursor: url ? "pointer" : "default" }}
+    >
+      {url ? "Abrir arquivo" : "Carregando link…"}
+    </a>
+  );
+}
+
+function FotoCard({ r, session }) {
+  const url = useSignedMediaUrl(r, session);
+  return (
+    <a
+      href={url || undefined}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => {
+        if (!url) e.preventDefault();
+      }}
+      style={{ display: "block", border: `1px solid ${COLORS.line}`, borderRadius: 12, overflow: "hidden", background: COLORS.panel2, textDecoration: "none" }}
+    >
+      {url ? (
+        <img src={url} alt={r.conteudo || "Foto da obra"} style={{ width: "100%", height: 120, objectFit: "cover", display: "block" }} />
+      ) : (
+        <div style={{ width: "100%", height: 120, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Camera size={22} color={COLORS.inkMuted} />
+        </div>
+      )}
+      <p style={{ margin: 0, padding: "8px 10px", fontSize: 11, color: COLORS.inkMuted }}>{formatDateAnyBR(r.criadoEm)}</p>
+    </a>
+  );
+}
+
 export default function CanteiroDashboard() {
   const [session, setSession] = useState(null);
   const [authMode, setAuthMode] = useState("login"); // login | criar | entrar
@@ -821,7 +891,7 @@ export default function CanteiroDashboard() {
                             </div>
                             {r.conteudo && <p style={{ margin: "6px 0 0", fontSize: 13, color: COLORS.inkMuted }}>{r.conteudo}</p>}
                             {r.valor != null && <p style={{ margin: "4px 0 0", fontSize: 13, fontWeight: 700 }}>{formatBRL(r.valor)}</p>}
-                            {r.mediaUrl && <a href={r.mediaUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: COLORS.green, fontWeight: 600 }}>Abrir arquivo</a>}
+                            <DocumentoLink r={r} session={session} />
                           </div>
                         </div>
                       ))}
@@ -840,16 +910,7 @@ export default function CanteiroDashboard() {
                   ) : (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12 }}>
                       {fotos.map((r) => (
-                        <a key={r.id} href={r.mediaUrl || undefined} target="_blank" rel="noreferrer" style={{ display: "block", border: `1px solid ${COLORS.line}`, borderRadius: 12, overflow: "hidden", background: COLORS.panel2, textDecoration: "none" }}>
-                          {r.mediaUrl ? (
-                            <img src={r.mediaUrl} alt={r.conteudo || "Foto da obra"} style={{ width: "100%", height: 120, objectFit: "cover", display: "block" }} />
-                          ) : (
-                            <div style={{ width: "100%", height: 120, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                              <Camera size={22} color={COLORS.inkMuted} />
-                            </div>
-                          )}
-                          <p style={{ margin: 0, padding: "8px 10px", fontSize: 11, color: COLORS.inkMuted }}>{formatDateAnyBR(r.criadoEm)}</p>
-                        </a>
+                        <FotoCard key={r.id} r={r} session={session} />
                       ))}
                     </div>
                   )}
@@ -934,7 +995,7 @@ export default function CanteiroDashboard() {
                 <input style={inputStyle} placeholder="20" value={entryForm.quantity} onChange={(e) => setEntryForm({ ...entryForm, quantity: e.target.value })} />
               </div>
               <div style={{ width: 100 }}>
-                <label style={labelStyle}>Unidade</label>
+                <label style={labelStyle}>Unizade</label>
                 <input style={inputStyle} placeholder="sacos" value={entryForm.unit} onChange={(e) => setEntryForm({ ...entryForm, unit: e.target.value })} />
               </div>
             </div>
