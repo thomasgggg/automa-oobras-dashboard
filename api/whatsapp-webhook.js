@@ -8,6 +8,7 @@
 import crypto from "crypto";
 import { sbAdmin, uploadMedia } from "./_lib/supabaseAdmin.js";
 import { downloadMedia, sendText } from "./_lib/whatsapp.js";
+import { interpretarMensagem } from "./_lib/ia.js";
 
 const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
 const APP_SECRET = process.env.META_APP_SECRET;
@@ -77,6 +78,46 @@ function classificarTipo(waType, conteudo) {
   if (waType === "document") return pareceNota ? "nota_fiscal" : "documento";
   if (waType === "audio") return "audio";
   return "texto";
+}
+
+// Interpreta o conteúdo da mensagem: tenta a IA primeiro (entende sinônimos,
+// erros de digitação, frases fora do padrão), e cai para o parser antigo por
+// regras (regex + palavras-chave) se a IA não estiver configurada, falhar ou
+// demorar demais. A automação nunca fica sem funcionar por causa da IA.
+//
+// Segurança: `obra` aqui só pode ser um item de `obras` (já filtrada pela
+// empresa do número, em obrasNoEscopoDoTelefone) — nunca um ID vindo direto
+// da IA. Tanto o caminho por IA quanto o caminho por regras já respeitam
+// essa restrição (a IA só devolve um nome, comparado contra a lista; o
+// regex usa encontrarObraNoTexto, que também só busca dentro de `obras`).
+async function interpretar({ texto, waType, obras }) {
+  try {
+    const iaResultado = await interpretarMensagem({ texto, waType, obras });
+    if (iaResultado) {
+      const obraEncontrada = iaResultado.obra_nome
+        ? obras.find((o) => normalizar(o.name) === normalizar(iaResultado.obra_nome)) || null
+        : null;
+      return {
+        intencao: iaResultado.intencao || "registro",
+        tipo: iaResultado.tipo || classificarTipo(waType, texto),
+        valor: iaResultado.valor ?? extrairValor(texto),
+        obra: obraEncontrada,
+        resposta: iaResultado.resposta || null,
+        viaIA: true,
+      };
+    }
+  } catch (e) {
+    console.error("Erro inesperado interpretando com IA, caindo para regras:", e.message || e);
+  }
+
+  return {
+    intencao: /quanto|resumo|total registrado/i.test(normalizar(texto)) ? "resumo" : "registro",
+    tipo: classificarTipo(waType, texto),
+    valor: extrairValor(texto),
+    obra: encontrarObraNoTexto(texto, obras),
+    resposta: null,
+    viaIA: false,
+  };
 }
 
 async function getSessao(telefone) {
@@ -250,10 +291,14 @@ export default async function handler(req, res) {
       return res.status(200).send("obra nao encontrada");
     }
 
+    // --- Interpreta a mensagem (IA com fallback por regras) ---
+    const interpretacao = await interpretar({ texto: conteudo, waType, obras });
+
     // --- Pergunta de resumo ("quanto já foi registrado?") ---
-    if (waType === "text" && /quanto|resumo|total registrado/i.test(conteudo)) {
+    if (interpretacao.intencao === "resumo") {
       const sessaoValida = await obraAindaValida(sessao);
-      const obraAtual = sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : encontrarObraNoTexto(conteudo, obras);
+      const obraAtual =
+        interpretacao.obra || (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null);
       if (obraAtual) {
         await sendText(telefone, await resumoDaObra(obraAtual));
         return res.status(200).send("resumo enviado");
@@ -261,13 +306,13 @@ export default async function handler(req, res) {
     }
 
     // --- Determinar a obra deste registro ---
-    let obra = encontrarObraNoTexto(conteudo, obras);
+    let obra = interpretacao.obra;
     if (!obra && (await obraAindaValida(sessao))) {
       obra = obras.find((o) => o.id === sessao.obra_id) || null;
     }
 
-    const tipo = classificarTipo(waType, conteudo);
-    const valor = extrairValor(conteudo);
+    const tipo = interpretacao.tipo;
+    const valor = interpretacao.valor;
 
     let mediaUrl = null;
     if (mediaId) {
@@ -291,19 +336,23 @@ export default async function handler(req, res) {
 
     if (obra) {
       await upsertSessao(telefone, { obra_id: obra.id, aguardando_obra: false, registro_pendente_id: null });
-      const respostas = {
+      const respostasPadrao = {
         nota_fiscal: `Nota recebida${valor ? ` (R$ ${valor.toFixed(2)})` : ""}. Gasto registrado e salvo no histórico da obra ${obra.name}.`,
         foto: `Atualização registrada em ${new Date().toLocaleDateString("pt-BR")}, com foto anexada na obra ${obra.name}.`,
         audio: `Áudio recebido e salvo no histórico da obra ${obra.name}.`,
         documento: `Documento anexado e salvo no histórico da obra ${obra.name}.`,
         texto: `Anotado na obra ${obra.name}.`,
       };
-      await sendText(telefone, respostas[tipo]);
+      // Usa a resposta natural da IA quando disponível; senão, a mensagem fixa de sempre.
+      await sendText(telefone, interpretacao.resposta || respostasPadrao[tipo]);
     } else {
       await upsertSessao(telefone, { aguardando_obra: true, registro_pendente_id: registro.id });
+      const listaObras = obras.map((o) => o.name).join(", ") || "(nenhuma obra cadastrada ainda)";
       await sendText(
         telefone,
-        `Recebi, mas para qual obra é esse registro? Obras cadastradas: ${obras.map((o) => o.name).join(", ") || "(nenhuma obra cadastrada ainda)"}`
+        interpretacao.resposta
+          ? `${interpretacao.resposta} Para qual obra é esse registro? Obras cadastradas: ${listaObras}`
+          : `Recebi, mas para qual obra é esse registro? Obras cadastradas: ${listaObras}`
       );
     }
 
