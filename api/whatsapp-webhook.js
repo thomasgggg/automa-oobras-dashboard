@@ -81,18 +81,20 @@ function classificarTipo(waType, conteudo) {
 }
 
 // Interpreta o conteúdo da mensagem: tenta a IA primeiro (entende sinônimos,
-// erros de digitação, frases fora do padrão), e cai para o parser antigo por
-// regras (regex + palavras-chave) se a IA não estiver configurada, falhar ou
-// demorar demais. A automação nunca fica sem funcionar por causa da IA.
+// erros de digitação, frases fora do padrão, e até áudio — o Gemini "ouve" a
+// nota de voz direto, sem transcrição separada), e cai para o parser antigo
+// por regras (regex + palavras-chave) se a IA não estiver configurada,
+// falhar ou demorar demais. A automação nunca fica sem funcionar por causa
+// da IA; para áudio sem IA disponível, o registro cai sem texto (como antes).
 //
 // Segurança: `obra` aqui só pode ser um item de `obras` (já filtrada pela
 // empresa do número, em obrasNoEscopoDoTelefone) — nunca um ID vindo direto
 // da IA. Tanto o caminho por IA quanto o caminho por regras já respeitam
 // essa restrição (a IA só devolve um nome, comparado contra a lista; o
 // regex usa encontrarObraNoTexto, que também só busca dentro de `obras`).
-async function interpretar({ texto, waType, obras }) {
+async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType }) {
   try {
-    const iaResultado = await interpretarMensagem({ texto, waType, obras });
+    const iaResultado = await interpretarMensagem({ texto, waType, obras, audioBuffer, audioMimeType });
     if (iaResultado) {
       const obraEncontrada = iaResultado.obra_nome
         ? obras.find((o) => normalizar(o.name) === normalizar(iaResultado.obra_nome)) || null
@@ -103,6 +105,7 @@ async function interpretar({ texto, waType, obras }) {
         valor: iaResultado.valor ?? extrairValor(texto),
         obra: obraEncontrada,
         resposta: iaResultado.resposta || null,
+        transcricao: iaResultado.transcricao || null,
         viaIA: true,
       };
     }
@@ -116,6 +119,7 @@ async function interpretar({ texto, waType, obras }) {
     valor: extrairValor(texto),
     obra: encontrarObraNoTexto(texto, obras),
     resposta: null,
+    transcricao: null,
     viaIA: false,
   };
 }
@@ -273,6 +277,17 @@ export default async function handler(req, res) {
       return res.status(200).send("tipo nao suportado");
     }
 
+    // Baixa a mídia (se houver) já aqui, antes da interpretação: para áudio,
+    // o Gemini precisa dos bytes para "ouvir" a nota de voz. Guardamos o
+    // buffer para reaproveitar no upload mais abaixo, sem baixar duas vezes.
+    let mediaBuffer = null;
+    let mediaBufferMimeType = null;
+    if (mediaId) {
+      const midia = await downloadMedia(mediaId);
+      mediaBuffer = midia.buffer;
+      mediaBufferMimeType = mimeType || midia.mimeType;
+    }
+
     // --- Resposta a "para qual obra é isso?" ---
     if (sessao?.aguardando_obra && waType === "text") {
       const obraEscolhida = encontrarObraNoTexto(conteudo, obras);
@@ -292,7 +307,13 @@ export default async function handler(req, res) {
     }
 
     // --- Interpreta a mensagem (IA com fallback por regras) ---
-    const interpretacao = await interpretar({ texto: conteudo, waType, obras });
+    const interpretacao = await interpretar({
+      texto: conteudo,
+      waType,
+      obras,
+      audioBuffer: waType === "audio" ? mediaBuffer : null,
+      audioMimeType: waType === "audio" ? mediaBufferMimeType : null,
+    });
 
     // --- Pergunta de resumo ("quanto já foi registrado?") ---
     if (interpretacao.intencao === "resumo") {
@@ -313,11 +334,14 @@ export default async function handler(req, res) {
 
     const tipo = interpretacao.tipo;
     const valor = interpretacao.valor;
+    // Para áudio, usa a transcrição resumida da IA como conteúdo salvo (fica
+    // um registro pesquisável do que foi falado); nos demais casos, mantém o
+    // texto/legenda original.
+    const conteudoSalvo = interpretacao.transcricao || conteudo;
 
     let mediaUrl = null;
-    if (mediaId) {
-      const midia = await downloadMedia(mediaId);
-      mediaUrl = await uploadMedia(`${telefone}-${mediaId}`, midia.buffer, mimeType || midia.mimeType);
+    if (mediaBuffer) {
+      mediaUrl = await uploadMedia(`${telefone}-${mediaId}`, mediaBuffer, mediaBufferMimeType);
     }
 
     const [registro] = await sbAdmin("registros", {
@@ -325,7 +349,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         obra_id: obra ? obra.id : null,
         tipo,
-        conteudo,
+        conteudo: conteudoSalvo,
         valor,
         media_url: mediaUrl,
         media_mime: mimeType,
