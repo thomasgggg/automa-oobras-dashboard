@@ -3,7 +3,8 @@ import {
   Plus, ArrowLeft, Trash2, Building2, Settings,
   AlertTriangle, X, Package, Calendar, TrendingUp, RefreshCw,
   MessageCircle, FileText, Camera, Mic, Paperclip, Search, LogOut, Copy, Users,
-  LayoutGrid, Wallet, ListChecks, BookOpen, Folder, Image as ImageIcon, CheckCircle2
+  LayoutGrid, Wallet, ListChecks, BookOpen, Folder, Image as ImageIcon, CheckCircle2,
+  Brain, Coins
 } from "lucide-react";
 
 // Projeto Supabase da Viga Automações (chave "publishable", segura para o navegador).
@@ -35,6 +36,7 @@ const STAGES = ["Fundação", "Estrutura", "Alvenaria", "Instalações", "Acabam
 const OBRA_TABS = [
   { key: "resumo", label: "Resumo", icon: LayoutGrid },
   { key: "orcamento", label: "Orçamento", icon: Wallet },
+  { key: "gastos", label: "Gastos", icon: Coins },
   { key: "cronograma", label: "Cronograma", icon: ListChecks },
   { key: "diario", label: "Diário de obra", icon: BookOpen },
   { key: "documentos", label: "Documentos", icon: Folder },
@@ -283,6 +285,17 @@ export default function CanteiroDashboard() {
   const [registros, setRegistros] = useState([]);
   const [busca, setBusca] = useState("");
 
+  // Painel "Assistente de IA": instruções extras (texto livre) que a empresa
+  // pode cadastrar para ajustar como o Gemini interpreta as mensagens do
+  // WhatsApp (tom das respostas, apelidos de material, regras do negócio).
+  // Fica salvo em empresas.instrucoes_ia e é lido pelo webhook a cada mensagem.
+  const [showIAConfig, setShowIAConfig] = useState(false);
+  const [iaInstrucoes, setIaInstrucoes] = useState("");
+  const [iaLoading, setIaLoading] = useState(false);
+  const [iaSaving, setIaSaving] = useState(false);
+  const [iaError, setIaError] = useState("");
+  const [iaSalvo, setIaSalvo] = useState(false);
+
   useEffect(() => {
     try {
       const saved = localStorage.getItem(SESSION_KEY);
@@ -294,30 +307,6 @@ export default function CanteiroDashboard() {
   useEffect(() => {
     if (session) loadData();
   }, [session]);
-
-  useEffect(() => {
-    if (session && selectedId && view === "detail") loadRegistros(selectedId);
-  }, [session, selectedId, view]);
-
-  async function loadRegistros(obraId) {
-    try {
-      const rows = await call(`registros?obra_id=eq.${obraId}&order=criado_em.desc`);
-      setRegistros(
-        (rows || []).map((r) => ({
-          id: r.id,
-          tipo: r.tipo,
-          conteudo: r.conteudo,
-          valor: r.valor != null ? Number(r.valor) : null,
-          mediaUrl: r.media_url,
-          remetente: r.remetente,
-          criadoEm: r.criado_em,
-        }))
-      );
-    } catch (e) {
-      // registros do WhatsApp são opcionais — se a tabela ainda não existir, ignore em silêncio
-      setRegistros([]);
-    }
-  }
 
   function persistSession(next) {
     setSession(next);
@@ -400,6 +389,36 @@ export default function CanteiroDashboard() {
     setShowEmpresaInfo(false);
   }
 
+  async function abrirConfigIA() {
+    setShowIAConfig(true);
+    setIaError("");
+    setIaSalvo(false);
+    setIaLoading(true);
+    try {
+      const rows = await call(`empresas?id=eq.${session.empresa.id}&select=instrucoes_ia`);
+      setIaInstrucoes((rows && rows[0] && rows[0].instrucoes_ia) || "");
+    } catch (e) {
+      setIaError(e.message || "Não consegui carregar as instruções salvas.");
+    }
+    setIaLoading(false);
+  }
+
+  async function salvarInstrucoesIA() {
+    setIaSaving(true);
+    setIaError("");
+    setIaSalvo(false);
+    try {
+      await call(`empresas?id=eq.${session.empresa.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ instrucoes_ia: iaInstrucoes.trim() || null }),
+      });
+      setIaSalvo(true);
+    } catch (e) {
+      setIaError(e.message || "Não consegui salvar as instruções.");
+    }
+    setIaSaving(false);
+  }
+
   // O token de acesso do Supabase expira depois de um tempo (ex.: 1h). Sem isso,
   // qualquer uso do painel além desse tempo passava a falhar com "JWT expired" —
   // inclusive dando a impressão de que uma obra cadastrada "sumiu" ao dar F5,
@@ -445,19 +464,49 @@ export default function CanteiroDashboard() {
     } catch (e) {
       setError(e.message || "Não consegui conectar no banco.");
     }
+    // Registros vindos do WhatsApp (notas fiscais, fotos, áudios, textos) — carregados
+    // de TODAS as obras da empresa aqui (não só da obra aberta) para que o valor de
+    // uma nota fiscal mandada pelo WhatsApp entre na conta do "gasto" da obra, e não
+    // fique só listado no diário. A tabela é opcional (só existe depois de configurar
+    // o WhatsApp), então uma falha aqui não deve travar o resto do painel.
+    try {
+      const rawRegistros = await call("registros?select=*&order=criado_em.desc");
+      setRegistros(
+        (rawRegistros || []).map((r) => ({
+          id: r.id,
+          obraId: r.obra_id,
+          tipo: r.tipo,
+          conteudo: r.conteudo,
+          valor: r.valor != null ? Number(r.valor) : null,
+          mediaUrl: r.media_url,
+          remetente: r.remetente,
+          criadoEm: r.criado_em,
+        }))
+      );
+    } catch (e) {
+      setRegistros([]);
+    }
     setSyncing(false);
   }
 
+  // "Gasto" de uma obra soma dois tipos de lançamento: os materiais cadastrados
+  // manualmente no painel (tabela materiais) E os registros com valor detectado
+  // vindos do WhatsApp (ex.: nota fiscal). Antes, só o primeiro entrava na conta —
+  // por isso uma mensagem de gasto pelo WhatsApp aparecia no diário da obra mas
+  // não mudava o total gasto/orçamento em lugar nenhum do painel.
   const stats = useMemo(() => {
     const map = {};
     obras.forEach((o) => {
-      const list = entries.filter((e) => e.obraId === o.id);
-      const spent = list.reduce((s, e) => s + Number(e.value || 0), 0);
+      const listMateriais = entries.filter((e) => e.obraId === o.id);
+      const listRegistros = registros.filter((r) => r.obraId === o.id && r.valor != null);
+      const spent =
+        listMateriais.reduce((s, e) => s + Number(e.value || 0), 0) +
+        listRegistros.reduce((s, r) => s + Number(r.valor || 0), 0);
       const budgetPct = o.budget > 0 ? (spent / o.budget) * 100 : 0;
-      map[o.id] = { spent, budgetPct, status: statusFor(o.progress, budgetPct), count: list.length };
+      map[o.id] = { spent, budgetPct, status: statusFor(o.progress, budgetPct), count: listMateriais.length + listRegistros.length };
     });
     return map;
-  }, [obras, entries]);
+  }, [obras, entries, registros]);
 
   const totalGasto = Object.values(stats).reduce((s, x) => s + x.spent, 0);
   const emRisco = obras.filter((o) => stats[o.id]?.status.key === "risco").length;
@@ -527,6 +576,7 @@ export default function CanteiroDashboard() {
 
   const selectedObra = obras.find((o) => o.id === selectedId);
   const selectedEntries = entries.filter((e) => e.obraId === selectedId).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const selectedRegistros = useMemo(() => registros.filter((r) => r.obraId === selectedId), [registros, selectedId]);
 
   const diario = useMemo(() => {
     const doMaterial = selectedEntries.map((e) => ({
@@ -538,7 +588,7 @@ export default function CanteiroDashboard() {
       data: e.date,
       ordenacao: e.date,
     }));
-    const doRegistro = registros.map((r) => ({
+    const doRegistro = selectedRegistros.map((r) => ({
       id: "r-" + r.id,
       icon: r.tipo === "nota_fiscal" ? FileText : r.tipo === "foto" ? Camera : r.tipo === "audio" ? Mic : r.tipo === "documento" ? Paperclip : MessageCircle,
       titulo: r.tipo.replace("_", " "),
@@ -550,17 +600,47 @@ export default function CanteiroDashboard() {
     return [...doMaterial, ...doRegistro]
       .filter((item) => !busca.trim() || `${item.titulo} ${item.subtitulo}`.toLowerCase().includes(busca.toLowerCase()))
       .sort((a, b) => (a.ordenacao < b.ordenacao ? 1 : -1));
-  }, [selectedEntries, registros, busca]);
+  }, [selectedEntries, selectedRegistros, busca]);
 
   const documentos = useMemo(
     () =>
-      registros
+      selectedRegistros
         .filter((r) => r.tipo === "nota_fiscal" || r.tipo === "documento")
         .filter((r) => !busca.trim() || (r.conteudo || "").toLowerCase().includes(busca.toLowerCase())),
-    [registros, busca]
+    [selectedRegistros, busca]
   );
 
-  const fotos = useMemo(() => registros.filter((r) => r.tipo === "foto"), [registros]);
+  const fotos = useMemo(() => selectedRegistros.filter((r) => r.tipo === "foto"), [selectedRegistros]);
+
+  // Planilha de gastos da obra: junta os lançamentos manuais (materiais) com os
+  // registros do WhatsApp que tiverem valor (hoje, só nota_fiscal costuma ter),
+  // numa única lista organizada por data — é o "extrato" completo do que já foi
+  // gasto, venha de onde vier o lançamento.
+  const gastos = useMemo(() => {
+    const doMaterial = selectedEntries.map((e) => ({
+      id: "m-" + e.id,
+      data: e.date,
+      descricao: e.material,
+      origem: "Lançamento manual",
+      etapa: e.stage,
+      valor: Number(e.value || 0),
+    }));
+    const doRegistro = selectedRegistros
+      .filter((r) => r.valor != null)
+      .map((r) => ({
+        id: "r-" + r.id,
+        data: r.criadoEm,
+        descricao: r.conteudo || r.tipo.replace("_", " "),
+        origem: "WhatsApp",
+        etapa: "—",
+        valor: Number(r.valor || 0),
+      }));
+    return [...doMaterial, ...doRegistro]
+      .filter((g) => !busca.trim() || `${g.descricao} ${g.origem} ${g.etapa}`.toLowerCase().includes(busca.toLowerCase()))
+      .sort((a, b) => (a.data < b.data ? 1 : -1));
+  }, [selectedEntries, selectedRegistros, busca]);
+
+  const totalGastosObra = useMemo(() => gastos.reduce((s, g) => s + g.valor, 0), [gastos]);
 
   const etapas = useMemo(() => {
     return STAGES.map((stage) => {
@@ -665,6 +745,9 @@ export default function CanteiroDashboard() {
             <div style={{ display: "flex", gap: 8 }}>
               <button style={btnIcon} onClick={loadData} aria-label="Sincronizar">
                 <RefreshCw size={16} style={{ animation: syncing ? "spin 1s linear infinite" : "none" }} />
+              </button>
+              <button style={btnIcon} onClick={abrirConfigIA} aria-label="Assistente de IA">
+                <Brain size={16} />
               </button>
               <button style={btnIcon} onClick={() => setShowEmpresaInfo(true)} aria-label="Minha empresa">
                 <Settings size={16} />
@@ -798,6 +881,56 @@ export default function CanteiroDashboard() {
                           <button style={btnIcon} onClick={() => deleteEntry(e.id)} aria-label="Excluir lançamento"><Trash2 size={14} /></button>
                         </div>
                       ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {obraTab === "gastos" && (
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+                    <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: 15, fontWeight: 800, margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                      <Coins size={16} color={COLORS.amber} /> Planilha de gastos
+                    </h3>
+                    <span style={{ fontSize: 13, color: COLORS.inkMuted }}>
+                      Total: <strong style={{ color: COLORS.ink }}>{formatBRL(totalGastosObra)}</strong>
+                    </span>
+                  </div>
+                  <SearchBox value={busca} onChange={setBusca} />
+                  {gastos.length === 0 ? (
+                    <EmptyState icon={<Coins size={22} color={COLORS.inkMuted} />} text="Nenhum gasto registrado ainda. Lançamentos manuais e mensagens do WhatsApp com valor (ex.: notas fiscais) aparecem aqui, organizados como uma planilha." />
+                  ) : (
+                    <div style={{ border: `1px solid ${COLORS.line}`, borderRadius: 12, overflow: "hidden" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ background: COLORS.panel2, textAlign: "left" }}>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Data</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Descrição</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Origem</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Etapa</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right" }}>Valor</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {gastos.map((g, i) => (
+                            <tr key={g.id} style={{ borderTop: i === 0 ? "none" : `1px solid ${COLORS.line}` }}>
+                              <td style={{ padding: "10px 14px", color: COLORS.inkMuted, whiteSpace: "nowrap" }}>{formatDateAnyBR(g.data)}</td>
+                              <td style={{ padding: "10px 14px", textTransform: "capitalize" }}>{g.descricao}</td>
+                              <td style={{ padding: "10px 14px" }}>
+                                <Badge label={g.origem} tone={g.origem === "WhatsApp" ? COLORS.green : COLORS.indigo} />
+                              </td>
+                              <td style={{ padding: "10px 14px", color: COLORS.inkMuted }}>{g.etapa}</td>
+                              <td style={{ padding: "10px 14px", fontWeight: 700, textAlign: "right" }}>{formatBRL(g.valor)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.panel2 }}>
+                            <td colSpan={4} style={{ padding: "10px 14px", fontWeight: 700 }}>Total</td>
+                            <td style={{ padding: "10px 14px", fontWeight: 800, textAlign: "right" }}>{formatBRL(totalGastosObra)}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
                     </div>
                   )}
                 </div>
@@ -958,6 +1091,48 @@ export default function CanteiroDashboard() {
         </Modal>
       )}
 
+      {showIAConfig && (
+        <Modal title="Assistente de IA" onClose={() => setShowIAConfig(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <p style={{ color: COLORS.inkMuted, fontSize: 13, margin: 0 }}>
+              A IA (Gemini) já entende texto e áudio do WhatsApp automaticamente. Use o campo abaixo para
+              ensinar preferências do seu negócio — apelidos de material, forma de responder, o que priorizar.
+              Isso é somado às regras fixas de segurança (a IA nunca vê dados de outra empresa nem inventa obra).
+            </p>
+            {iaLoading ? (
+              <p style={{ color: COLORS.inkMuted, fontSize: 13 }}>Carregando...</p>
+            ) : (
+              <div>
+                <label style={labelStyle}>Instruções extras para a IA</label>
+                <textarea
+                  style={{ ...inputStyle, minHeight: 160, resize: "vertical", fontFamily: "'Inter', sans-serif" }}
+                  placeholder={`Exemplos:\n- Trate "boca de lobo" e "guia" como material de infraestrutura.\n- Responda de forma mais informal, como se fosse um colega de obra.\n- Sempre que o valor passar de R$ 5.000, peça confirmação antes de registrar.`}
+                  value={iaInstrucoes}
+                  onChange={(e) => { setIaInstrucoes(e.target.value); setIaSalvo(false); }}
+                />
+              </div>
+            )}
+            {iaError && (
+              <div style={{ background: COLORS.red + "14", border: `1px solid ${COLORS.red}33`, color: COLORS.red, borderRadius: 10, padding: "8px 12px", fontSize: 13 }}>
+                {iaError}
+              </div>
+            )}
+            {iaSalvo && !iaError && (
+              <div style={{ background: COLORS.greenSoft, border: `1px solid ${COLORS.green}33`, color: COLORS.greenDark, borderRadius: 10, padding: "8px 12px", fontSize: 13 }}>
+                Instruções salvas. Já valem para a próxima mensagem recebida no WhatsApp.
+              </div>
+            )}
+            <button
+              style={{ ...btnPrimary, justifyContent: "center", marginTop: 6, opacity: iaSaving || iaLoading ? 0.6 : 1 }}
+              onClick={salvarInstrucoesIA}
+              disabled={iaSaving || iaLoading}
+            >
+              <Brain size={16} /> {iaSaving ? "Salvando..." : "Salvar instruções"}
+            </button>
+          </div>
+        </Modal>
+      )}
+
       {showAddObra && (
         <Modal title="Nova obra" onClose={() => setShowAddObra(false)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -995,7 +1170,7 @@ export default function CanteiroDashboard() {
                 <input style={inputStyle} placeholder="20" value={entryForm.quantity} onChange={(e) => setEntryForm({ ...entryForm, quantity: e.target.value })} />
               </div>
               <div style={{ width: 100 }}>
-                <label style={labelStyle}>Unizade</label>
+                <label style={labelStyle}>Unidade</label>
                 <input style={inputStyle} placeholder="sacos" value={entryForm.unit} onChange={(e) => setEntryForm({ ...entryForm, unit: e.target.value })} />
               </div>
             </div>
