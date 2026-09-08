@@ -63,6 +63,20 @@ function encontrarObraNoTexto(texto, obras) {
   return obras.find((o) => alvo.includes(normalizar(o.name))) || null;
 }
 
+// Compara o nome de obra sugerido pela IA com as obras cadastradas de forma
+// tolerante: a IA às vezes devolve o nome com uma palavra a mais/a menos
+// (ex.: "Obra Viga" em vez de "Viga", ou o contrário) mesmo quando instruída
+// a copiar exatamente. Em vez de exigir igualdade exata, aceitamos também
+// quando um nome contém o outro por completo — evita falso-negativo sem
+// abrir margem para associar a uma obra errada (a comparação continua sendo
+// só dentro da lista já restrita à empresa do telefone).
+function obraCorresponde(nomeSugerido, obra) {
+  const a = normalizar(nomeSugerido);
+  const b = normalizar(obra.name);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
 function extrairValor(texto) {
   const match = (texto || "").match(/r\$\s*([\d.]+,\d{2}|\d+)/i);
   if (!match) return null;
@@ -96,8 +110,17 @@ async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType })
   try {
     const iaResultado = await interpretarMensagem({ texto, waType, obras, audioBuffer, audioMimeType });
     if (iaResultado) {
+      console.log(
+        "IA (Gemini) interpretou:",
+        JSON.stringify({
+          intencao: iaResultado.intencao,
+          tipo: iaResultado.tipo,
+          obra_nome: iaResultado.obra_nome,
+          valor: iaResultado.valor,
+        })
+      );
       const obraEncontrada = iaResultado.obra_nome
-        ? obras.find((o) => normalizar(o.name) === normalizar(iaResultado.obra_nome)) || null
+        ? obras.find((o) => obraCorresponde(iaResultado.obra_nome, o)) || null
         : null;
       return {
         intencao: iaResultado.intencao || "registro",
