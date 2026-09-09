@@ -77,6 +77,35 @@ function obraCorresponde(nomeSugerido, obra) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+// Compara dois telefones de forma tolerante a formatação. A Meta sempre manda
+// o número em E.164 sem "+" (ex.: 5511988887777), mas quem cadastra a obra no
+// painel pode digitar com parênteses, traço, espaço, sem o "55" do Brasil, ou
+// sem o "9" extra dos celulares — uma igualdade exata (===) faz esses casos
+// comuns falharem silenciosamente, deixando o número "não identificado".
+function normalizarTelefone(t) {
+  return (t || "").replace(/\D/g, "");
+}
+
+// Reduz um telefone brasileiro a (DDD + 8 dígitos), removendo o código do
+// país (55) e o "9" extra do celular quando presentes, para que "11988887777",
+// "5511988887777" e "(11) 9 8888-7777" virem todos a mesma chave.
+function chaveTelefoneBR(t) {
+  let d = normalizarTelefone(t);
+  if (d.length > 11 && d.startsWith("55")) d = d.slice(2);
+  if (d.length === 11) d = d.slice(0, 2) + d.slice(3);
+  return d.length >= 10 ? d.slice(-10) : d;
+}
+
+function telefoneCorresponde(a, b) {
+  if (!a || !b) return false;
+  const ka = chaveTelefoneBR(a);
+  const kb = chaveTelefoneBR(b);
+  if (ka && ka === kb) return true;
+  // Reserva para números fora do padrão BR (outro DDI, tamanho diferente):
+  // compara os dígitos completos, sem tentar remover DDI/9.
+  return normalizarTelefone(a) === normalizarTelefone(b);
+}
+
 function extrairValor(texto) {
   const match = (texto || "").match(/r\$\s*([\d.]+,\d{2}|\d+)/i);
   if (!match) return null;
@@ -106,9 +135,9 @@ function classificarTipo(waType, conteudo) {
 // da IA. Tanto o caminho por IA quanto o caminho por regras já respeitam
 // essa restrição (a IA só devolve um nome, comparado contra a lista; o
 // regex usa encontrarObraNoTexto, que também só busca dentro de `obras`).
-async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType }) {
+async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType, instrucoesExtras }) {
   try {
-    const iaResultado = await interpretarMensagem({ texto, waType, obras, audioBuffer, audioMimeType });
+    const iaResultado = await interpretarMensagem({ texto, waType, obras, audioBuffer, audioMimeType, instrucoesExtras });
     if (iaResultado) {
       console.log(
         "IA (Gemini) interpretou:",
@@ -180,27 +209,54 @@ async function obraAindaValida(sessao) {
 //      hoje no cadastro.
 // Se nenhuma das duas resolver, devolvemos lista vazia — nunca uma lista
 // global — e quem chamou decide como responder com segurança.
+// Nota: os selects abaixo incluem empresa_id além de id/name/telefone. Isso
+// não é exposto à IA (que só recebe os nomes das obras, ver interpretar()) —
+// serve só para localizar, aqui no servidor, as instruções de IA que a
+// empresa cadastrou no painel (instrucoesIADaEmpresa, logo abaixo).
 async function obrasNoEscopoDoTelefone(telefone, sessao) {
   if (await obraAindaValida(sessao)) {
     const [obraDaSessao] = await sbAdmin(`obras?id=eq.${sessao.obra_id}&select=id,name,telefone,empresa_id`);
     if (obraDaSessao && obraDaSessao.empresa_id) {
-      return sbAdmin(`obras?empresa_id=eq.${obraDaSessao.empresa_id}&select=id,name,telefone`);
+      return sbAdmin(`obras?empresa_id=eq.${obraDaSessao.empresa_id}&select=id,name,telefone,empresa_id`);
     }
   }
 
-  const porTelefone = await sbAdmin(`obras?telefone=eq.${encodeURIComponent(telefone)}&select=id,name,telefone,empresa_id`);
-  if (!porTelefone || porTelefone.length === 0) return [];
+  // Busca tolerante: traz todas as obras com telefone cadastrado e compara
+  // aqui (normalizando formatação/DDI/"9" extra) em vez de um "=eq." exato no
+  // banco, que falhava sempre que o número foi digitado com formatação
+  // diferente da que a Meta manda.
+  const todasComTelefone = await sbAdmin(`obras?telefone=not.is.null&select=id,name,telefone,empresa_id`);
+  const porTelefone = (todasComTelefone || []).filter((o) => telefoneCorresponde(telefone, o.telefone));
+  if (porTelefone.length === 0) {
+    console.log(
+      "Nenhuma obra encontrada para este telefone (mesmo com comparação tolerante):",
+      JSON.stringify({ telefoneRecebido: telefone, chaveRecebida: chaveTelefoneBR(telefone) })
+    );
+    return [];
+  }
 
   const empresaIds = [...new Set(porTelefone.map((o) => o.empresa_id).filter(Boolean))];
   if (empresaIds.length === 1) {
     // Um único vínculo claro: abre para todas as obras dessa empresa (o
     // responsável de uma obra também pode lançar em outra obra da mesma empresa).
-    return sbAdmin(`obras?empresa_id=eq.${empresaIds[0]}&select=id,name,telefone`);
+    return sbAdmin(`obras?empresa_id=eq.${empresaIds[0]}&select=id,name,telefone,empresa_id`);
   }
   // Esse número está cadastrado como responsável em mais de uma empresa ao
   // mesmo tempo (raro, mas possível). Para não misturar as duas, ficamos
   // restritos só às obras onde ele já está explicitamente cadastrado.
   return porTelefone;
+}
+
+// Busca o texto de instruções de IA que a empresa configurou no painel
+// (Configurações > Assistente de IA). Todas as obras da lista pertencem à
+// mesma empresa (garantido por obrasNoEscopoDoTelefone), então basta olhar
+// o empresa_id da primeira. Devolve null se a empresa não configurou nada
+// (a IA usa só o prompt padrão nesse caso) ou se não houver obra alguma.
+async function instrucoesIADaEmpresa(obras) {
+  const empresaId = obras && obras[0] && obras[0].empresa_id;
+  if (!empresaId) return null;
+  const [empresa] = await sbAdmin(`empresas?id=eq.${empresaId}&select=instrucoes_ia`);
+  return (empresa && empresa.instrucoes_ia) || null;
 }
 
 async function resumoDaObra(obra) {
@@ -330,12 +386,14 @@ export default async function handler(req, res) {
     }
 
     // --- Interpreta a mensagem (IA com fallback por regras) ---
+    const instrucoesExtras = await instrucoesIADaEmpresa(obras);
     const interpretacao = await interpretar({
       texto: conteudo,
       waType,
       obras,
       audioBuffer: waType === "audio" ? mediaBuffer : null,
       audioMimeType: waType === "audio" ? mediaBufferMimeType : null,
+      instrucoesExtras,
     });
 
     // --- Pergunta de resumo ("quanto já foi registrado?") ---
