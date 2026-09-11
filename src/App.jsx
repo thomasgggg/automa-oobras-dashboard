@@ -4,7 +4,7 @@ import {
   AlertTriangle, X, Package, Calendar, TrendingUp, RefreshCw,
   MessageCircle, FileText, Camera, Mic, Paperclip, Search, LogOut, Copy, Users,
   LayoutGrid, Wallet, ListChecks, BookOpen, Folder, Image as ImageIcon, CheckCircle2,
-  Brain, Coins
+  Brain, Coins, Ruler, HardHat
 } from "lucide-react";
 
 // Projeto Supabase da Viga Automações (chave "publishable", segura para o navegador).
@@ -37,6 +37,8 @@ const OBRA_TABS = [
   { key: "resumo", label: "Resumo", icon: LayoutGrid },
   { key: "orcamento", label: "Orçamento", icon: Wallet },
   { key: "gastos", label: "Gastos", icon: Coins },
+  { key: "medicoes", label: "Medições", icon: Ruler },
+  { key: "turma", label: "Turma", icon: HardHat },
   { key: "cronograma", label: "Cronograma", icon: ListChecks },
   { key: "diario", label: "Diário de obra", icon: BookOpen },
   { key: "documentos", label: "Documentos", icon: Folder },
@@ -285,6 +287,36 @@ export default function CanteiroDashboard() {
   const [registros, setRegistros] = useState([]);
   const [busca, setBusca] = useState("");
 
+  // Duas planilhas por obra, do jeito que construtoras costumam usar: o que
+  // se recebe do engenheiro/incorporador por medição (medicoes) e os
+  // comprovantes de pagamento à equipe/empreiteiros (pagamentos_turma).
+  // Ambas as tabelas são opcionais (só existem depois da migração
+  // schema_medicoes_turma.sql), então o carregamento é tolerante a falha.
+  const [medicoes, setMedicoes] = useState([]);
+  const [turma, setTurma] = useState([]);
+  const [showAddMedicao, setShowAddMedicao] = useState(false);
+  const [showAddTurma, setShowAddTurma] = useState(false);
+  const [medicaoForm, setMedicaoForm] = useState({
+    numero_medicao: "",
+    data: new Date().toISOString().slice(0, 10),
+    etapa: "",
+    item: "",
+    ambiente: "",
+    quantidade: "",
+    unidade: "",
+    valor_unitario: "",
+    percentual: "",
+    valor_recebido: "",
+  });
+  const [turmaForm, setTurmaForm] = useState({
+    data: new Date().toISOString().slice(0, 10),
+    trabalhador: "",
+    servico: "",
+    valor: "",
+    forma_pagamento: "Pix",
+    observacao: "",
+  });
+
   // Painel "Assistente de IA": instruções extras (texto livre) que a empresa
   // pode cadastrar para ajustar como o Gemini interpreta as mensagens do
   // WhatsApp (tom das respostas, apelidos de material, regras do negócio).
@@ -385,6 +417,8 @@ export default function CanteiroDashboard() {
     setObras([]);
     setEntries([]);
     setRegistros([]);
+    setMedicoes([]);
+    setTurma([]);
     setView("overview");
     setShowEmpresaInfo(false);
   }
@@ -486,6 +520,51 @@ export default function CanteiroDashboard() {
     } catch (e) {
       setRegistros([]);
     }
+
+    // Planilha "Medições" (o que se recebe do engenheiro/incorporador).
+    try {
+      const rawMedicoes = await call("medicoes?select=*&order=data.desc");
+      setMedicoes(
+        (rawMedicoes || []).map((m) => ({
+          id: m.id,
+          obraId: m.obra_id,
+          numeroMedicao: m.numero_medicao,
+          data: m.data,
+          etapa: m.etapa,
+          item: m.item,
+          ambiente: m.ambiente,
+          quantidade: m.quantidade != null ? Number(m.quantidade) : null,
+          unidade: m.unidade,
+          valorUnitario: m.valor_unitario != null ? Number(m.valor_unitario) : null,
+          valorTotal: m.valor_total != null ? Number(m.valor_total) : 0,
+          percentual: m.percentual != null ? Number(m.percentual) : null,
+          valorRecebido: m.valor_recebido != null ? Number(m.valor_recebido) : 0,
+          valorAReceber: m.valor_a_receber != null ? Number(m.valor_a_receber) : 0,
+        }))
+      );
+    } catch (e) {
+      setMedicoes([]);
+    }
+
+    // Planilha "Turma" (comprovantes de pagamento à equipe/empreiteiros).
+    try {
+      const rawTurma = await call("pagamentos_turma?select=*&order=data.desc");
+      setTurma(
+        (rawTurma || []).map((t) => ({
+          id: t.id,
+          obraId: t.obra_id,
+          data: t.data,
+          trabalhador: t.trabalhador,
+          servico: t.servico,
+          valor: Number(t.valor || 0),
+          formaPagamento: t.forma_pagamento,
+          observacao: t.observacao,
+        }))
+      );
+    } catch (e) {
+      setTurma([]);
+    }
+
     setSyncing(false);
   }
 
@@ -556,6 +635,82 @@ export default function CanteiroDashboard() {
     }
   }
 
+  // Planilha "Medições": valor_total e valor_a_receber são calculados aqui
+  // (quantidade × valor unitário; total menos o que já foi recebido) para
+  // não obrigar quem está digitando a fazer conta — só copia os números que
+  // já vêm na planilha do engenheiro.
+  async function addMedicao() {
+    if (!medicaoForm.ambiente.trim()) return;
+    const quantidade = medicaoForm.quantidade ? Number(medicaoForm.quantidade) : null;
+    const valorUnitario = medicaoForm.valor_unitario ? Number(medicaoForm.valor_unitario) : null;
+    const valorTotal = quantidade != null && valorUnitario != null ? quantidade * valorUnitario : 0;
+    const valorRecebido = medicaoForm.valor_recebido ? Number(medicaoForm.valor_recebido) : 0;
+    const medicao = {
+      id: uid(),
+      obra_id: selectedId,
+      numero_medicao: medicaoForm.numero_medicao.trim() || null,
+      data: medicaoForm.data,
+      etapa: medicaoForm.etapa.trim() || null,
+      item: medicaoForm.item.trim() || null,
+      ambiente: medicaoForm.ambiente.trim(),
+      quantidade,
+      unidade: medicaoForm.unidade.trim() || null,
+      valor_unitario: valorUnitario,
+      valor_total: valorTotal,
+      percentual: medicaoForm.percentual ? Number(medicaoForm.percentual) : null,
+      valor_recebido: valorRecebido,
+      valor_a_receber: valorTotal - valorRecebido,
+    };
+    try {
+      await call("medicoes", { method: "POST", body: JSON.stringify(medicao) });
+      setMedicaoForm({ numero_medicao: "", data: new Date().toISOString().slice(0, 10), etapa: "", item: "", ambiente: "", quantidade: "", unidade: "", valor_unitario: "", percentual: "", valor_recebido: "" });
+      setShowAddMedicao(false);
+      loadData();
+    } catch (e) {
+      setError(e.message || "Não consegui salvar a medição no banco. Verifique se a migração schema_medicoes_turma.sql já foi rodada no Supabase.");
+    }
+  }
+
+  async function deleteMedicao(id) {
+    try {
+      await call(`medicoes?id=eq.${id}`, { method: "DELETE" });
+      loadData();
+    } catch (e) {
+      setError(e.message || "Não consegui excluir a medição.");
+    }
+  }
+
+  async function addPagamentoTurma() {
+    if (!turmaForm.trabalhador.trim() || !turmaForm.valor) return;
+    const pagamento = {
+      id: uid(),
+      obra_id: selectedId,
+      data: turmaForm.data,
+      trabalhador: turmaForm.trabalhador.trim(),
+      servico: turmaForm.servico.trim() || null,
+      valor: Number(turmaForm.valor),
+      forma_pagamento: turmaForm.forma_pagamento || null,
+      observacao: turmaForm.observacao.trim() || null,
+    };
+    try {
+      await call("pagamentos_turma", { method: "POST", body: JSON.stringify(pagamento) });
+      setTurmaForm({ data: new Date().toISOString().slice(0, 10), trabalhador: "", servico: "", valor: "", forma_pagamento: "Pix", observacao: "" });
+      setShowAddTurma(false);
+      loadData();
+    } catch (e) {
+      setError(e.message || "Não consegui salvar o pagamento no banco. Verifique se a migração schema_medicoes_turma.sql já foi rodada no Supabase.");
+    }
+  }
+
+  async function deletePagamentoTurma(id) {
+    try {
+      await call(`pagamentos_turma?id=eq.${id}`, { method: "DELETE" });
+      loadData();
+    } catch (e) {
+      setError(e.message || "Não consegui excluir o pagamento.");
+    }
+  }
+
   async function deleteObra(id) {
     try {
       await call(`materiais?obra_id=eq.${id}`, { method: "DELETE" });
@@ -577,6 +732,31 @@ export default function CanteiroDashboard() {
   const selectedObra = obras.find((o) => o.id === selectedId);
   const selectedEntries = entries.filter((e) => e.obraId === selectedId).sort((a, b) => (a.date < b.date ? 1 : -1));
   const selectedRegistros = useMemo(() => registros.filter((r) => r.obraId === selectedId), [registros, selectedId]);
+  const selectedMedicoes = useMemo(() => {
+    return medicoes
+      .filter((m) => m.obraId === selectedId)
+      .filter((m) => !busca.trim() || `${m.ambiente} ${m.etapa || ""} ${m.numeroMedicao || ""}`.toLowerCase().includes(busca.toLowerCase()))
+      .sort((a, b) => (a.data < b.data ? 1 : -1));
+  }, [medicoes, selectedId, busca]);
+  const totaisMedicoes = useMemo(
+    () =>
+      selectedMedicoes.reduce(
+        (acc, m) => ({
+          total: acc.total + (m.valorTotal || 0),
+          recebido: acc.recebido + (m.valorRecebido || 0),
+          aReceber: acc.aReceber + (m.valorAReceber || 0),
+        }),
+        { total: 0, recebido: 0, aReceber: 0 }
+      ),
+    [selectedMedicoes]
+  );
+  const selectedTurma = useMemo(() => {
+    return turma
+      .filter((t) => t.obraId === selectedId)
+      .filter((t) => !busca.trim() || `${t.trabalhador} ${t.servico || ""} ${t.observacao || ""}`.toLowerCase().includes(busca.toLowerCase()))
+      .sort((a, b) => (a.data < b.data ? 1 : -1));
+  }, [turma, selectedId, busca]);
+  const totalPagoTurma = useMemo(() => selectedTurma.reduce((s, t) => s + (t.valor || 0), 0), [selectedTurma]);
 
   const diario = useMemo(() => {
     const doMaterial = selectedEntries.map((e) => ({
@@ -936,6 +1116,135 @@ export default function CanteiroDashboard() {
                 </div>
               )}
 
+              {obraTab === "medicoes" && (
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+                    <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: 15, fontWeight: 800, margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                      <Ruler size={16} color={COLORS.indigo} /> Medições (engenheiro)
+                    </h3>
+                    <button style={btnPrimary} onClick={() => setShowAddMedicao(true)}><Plus size={16} /> Registrar item medido</button>
+                  </div>
+                  <p style={{ color: COLORS.inkMuted, fontSize: 13, margin: "0 0 16px" }}>
+                    O que a obra recebe do engenheiro/incorporador, por medição — igual à planilha que ele te manda.
+                  </p>
+                  <SearchBox value={busca} onChange={setBusca} />
+                  {selectedMedicoes.length === 0 ? (
+                    <EmptyState icon={<Ruler size={22} color={COLORS.inkMuted} />} text="Nenhuma medição registrada ainda. Cadastre os itens de cada medição recebida do engenheiro para acompanhar o que já foi recebido e o que falta." />
+                  ) : (
+                    <div style={{ border: `1px solid ${COLORS.line}`, borderRadius: 12, overflow: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 880 }}>
+                        <thead>
+                          <tr style={{ background: COLORS.panel2, textAlign: "left" }}>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>Medição</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>Data</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Etapa</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Item</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Ambiente</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right" }}>Quant.</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Unid.</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right" }}>Vlr. unit.</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right" }}>Vlr. total</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right" }}>%</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right" }}>Recebido</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right" }}>A receber</th>
+                            <th style={{ padding: "10px 14px" }}></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedMedicoes.map((m, i) => (
+                            <tr key={m.id} style={{ borderTop: i === 0 ? "none" : `1px solid ${COLORS.line}` }}>
+                              <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>{m.numeroMedicao || "—"}</td>
+                              <td style={{ padding: "10px 14px", color: COLORS.inkMuted, whiteSpace: "nowrap" }}>{formatDateAnyBR(m.data)}</td>
+                              <td style={{ padding: "10px 14px", color: COLORS.inkMuted }}>{m.etapa || "—"}</td>
+                              <td style={{ padding: "10px 14px" }}>{m.item || "—"}</td>
+                              <td style={{ padding: "10px 14px" }}>{m.ambiente}</td>
+                              <td style={{ padding: "10px 14px", textAlign: "right" }}>{m.quantidade ?? "—"}</td>
+                              <td style={{ padding: "10px 14px", color: COLORS.inkMuted }}>{m.unidade || "—"}</td>
+                              <td style={{ padding: "10px 14px", textAlign: "right" }}>{m.valorUnitario != null ? formatBRL(m.valorUnitario) : "—"}</td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", fontWeight: 700 }}>{formatBRL(m.valorTotal)}</td>
+                              <td style={{ padding: "10px 14px", textAlign: "right" }}>{m.percentual != null ? `${m.percentual}%` : "—"}</td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", color: COLORS.green }}>{formatBRL(m.valorRecebido)}</td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", color: m.valorAReceber > 0 ? COLORS.amber : COLORS.inkMuted, fontWeight: 700 }}>{formatBRL(m.valorAReceber)}</td>
+                              <td style={{ padding: "10px 14px" }}>
+                                <button style={btnIcon} onClick={() => deleteMedicao(m.id)} aria-label="Excluir medição"><Trash2 size={14} /></button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.panel2 }}>
+                            <td colSpan={8} style={{ padding: "10px 14px", fontWeight: 700 }}>Total</td>
+                            <td style={{ padding: "10px 14px", fontWeight: 800, textAlign: "right" }}>{formatBRL(totaisMedicoes.total)}</td>
+                            <td></td>
+                            <td style={{ padding: "10px 14px", fontWeight: 800, textAlign: "right", color: COLORS.green }}>{formatBRL(totaisMedicoes.recebido)}</td>
+                            <td style={{ padding: "10px 14px", fontWeight: 800, textAlign: "right", color: COLORS.amber }}>{formatBRL(totaisMedicoes.aReceber)}</td>
+                            <td></td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {obraTab === "turma" && (
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+                    <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: 15, fontWeight: 800, margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                      <HardHat size={16} color={COLORS.amber} /> Turma — comprovantes de pagamento
+                    </h3>
+                    <button style={btnPrimary} onClick={() => setShowAddTurma(true)}><Plus size={16} /> Registrar pagamento</button>
+                  </div>
+                  <p style={{ color: COLORS.inkMuted, fontSize: 13, margin: "0 0 16px" }}>
+                    O que é pago à equipe e aos empreiteiros da obra — para ter o comprovante de cada valor.
+                  </p>
+                  <SearchBox value={busca} onChange={setBusca} />
+                  {selectedTurma.length === 0 ? (
+                    <EmptyState icon={<HardHat size={22} color={COLORS.inkMuted} />} text="Nenhum pagamento registrado ainda. Cadastre aqui cada valor pago à turma, com o comprovante." />
+                  ) : (
+                    <div style={{ border: `1px solid ${COLORS.line}`, borderRadius: 12, overflow: "hidden" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ background: COLORS.panel2, textAlign: "left" }}>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Data</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Trabalhador/turma</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Serviço</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Pagamento</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>Observação</th>
+                            <th style={{ padding: "10px 14px", fontSize: 11, color: COLORS.inkMuted, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right" }}>Valor</th>
+                            <th style={{ padding: "10px 14px" }}></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedTurma.map((t, i) => (
+                            <tr key={t.id} style={{ borderTop: i === 0 ? "none" : `1px solid ${COLORS.line}` }}>
+                              <td style={{ padding: "10px 14px", color: COLORS.inkMuted, whiteSpace: "nowrap" }}>{formatDateAnyBR(t.data)}</td>
+                              <td style={{ padding: "10px 14px", fontWeight: 600 }}>{t.trabalhador}</td>
+                              <td style={{ padding: "10px 14px", color: COLORS.inkMuted }}>{t.servico || "—"}</td>
+                              <td style={{ padding: "10px 14px" }}>
+                                {t.formaPagamento ? <Badge label={t.formaPagamento} tone={COLORS.indigo} /> : "—"}
+                              </td>
+                              <td style={{ padding: "10px 14px", color: COLORS.inkMuted }}>{t.observacao || "—"}</td>
+                              <td style={{ padding: "10px 14px", textAlign: "right", fontWeight: 700 }}>{formatBRL(t.valor)}</td>
+                              <td style={{ padding: "10px 14px" }}>
+                                <button style={btnIcon} onClick={() => deletePagamentoTurma(t.id)} aria-label="Excluir pagamento"><Trash2 size={14} /></button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr style={{ borderTop: `2px solid ${COLORS.line}`, background: COLORS.panel2 }}>
+                            <td colSpan={5} style={{ padding: "10px 14px", fontWeight: 700 }}>Total pago</td>
+                            <td style={{ padding: "10px 14px", fontWeight: 800, textAlign: "right" }}>{formatBRL(totalPagoTurma)}</td>
+                            <td></td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {obraTab === "cronograma" && (
                 <div>
                   <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: 15, fontWeight: 800, margin: "0 0 16px" }}>Cronograma</h3>
@@ -1191,6 +1500,105 @@ export default function CanteiroDashboard() {
               </div>
             </div>
             <button style={{ ...btnPrimary, justifyContent: "center", marginTop: 6 }} onClick={addEntry}>Registrar</button>
+          </div>
+        </Modal>
+      )}
+
+      {showAddMedicao && (
+        <Modal title="Registrar item medido" onClose={() => setShowAddMedicao(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Nº da medição</label>
+                <input style={inputStyle} placeholder="49" value={medicaoForm.numero_medicao} onChange={(e) => setMedicaoForm({ ...medicaoForm, numero_medicao: e.target.value })} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Data</label>
+                <input style={inputStyle} type="date" value={medicaoForm.data} onChange={(e) => setMedicaoForm({ ...medicaoForm, data: e.target.value })} />
+              </div>
+            </div>
+            <div>
+              <label style={labelStyle}>Etapa</label>
+              <input style={inputStyle} placeholder="Primeira etapa - Obra bruta - Levantar e cobrir + laje técnica" value={medicaoForm.etapa} onChange={(e) => setMedicaoForm({ ...medicaoForm, etapa: e.target.value })} />
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ width: 90 }}>
+                <label style={labelStyle}>Item</label>
+                <input style={inputStyle} placeholder="8" value={medicaoForm.item} onChange={(e) => setMedicaoForm({ ...medicaoForm, item: e.target.value })} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Ambiente / descrição</label>
+                <input style={inputStyle} placeholder="Telhado sem lambril no beiral, corredor e sacada" value={medicaoForm.ambiente} onChange={(e) => setMedicaoForm({ ...medicaoForm, ambiente: e.target.value })} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Quantidade</label>
+                <input style={inputStyle} type="number" placeholder="2119,70" value={medicaoForm.quantidade} onChange={(e) => setMedicaoForm({ ...medicaoForm, quantidade: e.target.value })} />
+              </div>
+              <div style={{ width: 100 }}>
+                <label style={labelStyle}>Unidade</label>
+                <input style={inputStyle} placeholder="m²" value={medicaoForm.unidade} onChange={(e) => setMedicaoForm({ ...medicaoForm, unidade: e.target.value })} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Valor unit. (R$)</label>
+                <input style={inputStyle} type="number" placeholder="100,00" value={medicaoForm.valor_unitario} onChange={(e) => setMedicaoForm({ ...medicaoForm, valor_unitario: e.target.value })} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>% medido nesta medição</label>
+                <input style={inputStyle} type="number" placeholder="100" value={medicaoForm.percentual} onChange={(e) => setMedicaoForm({ ...medicaoForm, percentual: e.target.value })} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Valor recebido (R$)</label>
+                <input style={inputStyle} type="number" placeholder="0" value={medicaoForm.valor_recebido} onChange={(e) => setMedicaoForm({ ...medicaoForm, valor_recebido: e.target.value })} />
+              </div>
+            </div>
+            <p style={{ color: COLORS.inkMuted, fontSize: 12, margin: 0 }}>
+              Valor total e valor a receber são calculados automaticamente (quantidade × valor unitário, menos o já recebido).
+            </p>
+            <button style={{ ...btnPrimary, justifyContent: "center", marginTop: 6 }} onClick={addMedicao}>Registrar medição</button>
+          </div>
+        </Modal>
+      )}
+
+      {showAddTurma && (
+        <Modal title="Registrar pagamento à turma" onClose={() => setShowAddTurma(false)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <label style={labelStyle}>Trabalhador / turma / empreiteiro</label>
+              <input style={inputStyle} placeholder="João Pedreiro" value={turmaForm.trabalhador} onChange={(e) => setTurmaForm({ ...turmaForm, trabalhador: e.target.value })} />
+            </div>
+            <div>
+              <label style={labelStyle}>Serviço prestado</label>
+              <input style={inputStyle} placeholder="Levantamento de alvenaria" value={turmaForm.servico} onChange={(e) => setTurmaForm({ ...turmaForm, servico: e.target.value })} />
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Valor (R$)</label>
+                <input style={inputStyle} type="number" placeholder="800" value={turmaForm.valor} onChange={(e) => setTurmaForm({ ...turmaForm, valor: e.target.value })} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Forma de pagamento</label>
+                <select style={inputStyle} value={turmaForm.forma_pagamento} onChange={(e) => setTurmaForm({ ...turmaForm, forma_pagamento: e.target.value })}>
+                  <option value="Pix">Pix</option>
+                  <option value="Dinheiro">Dinheiro</option>
+                  <option value="Transferência">Transferência</option>
+                  <option value="Cartão">Cartão</option>
+                  <option value="Outro">Outro</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label style={labelStyle}>Data</label>
+              <input style={inputStyle} type="date" value={turmaForm.data} onChange={(e) => setTurmaForm({ ...turmaForm, data: e.target.value })} />
+            </div>
+            <div>
+              <label style={labelStyle}>Observação (opcional)</label>
+              <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical", fontFamily: "'Inter', sans-serif" }} placeholder="Referente à semana de 01 a 07/09" value={turmaForm.observacao} onChange={(e) => setTurmaForm({ ...turmaForm, observacao: e.target.value })} />
+            </div>
+            <button style={{ ...btnPrimary, justifyContent: "center", marginTop: 6 }} onClick={addPagamentoTurma}>Registrar pagamento</button>
           </div>
         </Modal>
       )}
