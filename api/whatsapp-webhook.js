@@ -106,8 +106,17 @@ function telefoneCorresponde(a, b) {
   return normalizarTelefone(a) === normalizarTelefone(b);
 }
 
+// Extrai um valor em reais do texto (usado no parser por regras, quando a IA
+// não está disponível). Na fala/escrita natural quase ninguém escreve "R$" ou
+// "reais" — por isso, além do formato explícito, também aceitamos um número
+// logo após um verbo comum de gasto ("gastei 350 no cimento").
 function extrairValor(texto) {
-  const match = (texto || "").match(/r\$\s*([\d.]+,\d{2}|\d+)/i);
+  const t = texto || "";
+  const numero = "([\\d.]+,\\d{2}|\\d+(?:\\.\\d{3})*)"; // 350 | 1.200 | 89,90
+  let match =
+    t.match(new RegExp(`r\\$\\s*${numero}`, "i")) ||
+    t.match(new RegExp(`${numero}\\s*reais`, "i")) ||
+    t.match(new RegExp(`(?:gastei|paguei|custou|comprei por|saiu por|foi)\\s*${numero}`, "i"));
   if (!match) return null;
   const num = match[1].replace(/\./g, "").replace(",", ".");
   const valor = parseFloat(num);
@@ -155,6 +164,8 @@ async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType, i
         intencao: iaResultado.intencao || "registro",
         tipo: iaResultado.tipo || classificarTipo(waType, texto),
         valor: iaResultado.valor ?? extrairValor(texto),
+        progressoAbsoluto: iaResultado.progresso_absoluto ?? null,
+        progressoIncremento: iaResultado.progresso_incremento ?? null,
         obra: obraEncontrada,
         resposta: iaResultado.resposta || null,
         transcricao: iaResultado.transcricao || null,
@@ -165,10 +176,15 @@ async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType, i
     console.error("Erro inesperado interpretando com IA, caindo para regras:", e.message || e);
   }
 
+  // Sem IA disponível, uma atualização de progresso ("avançamos 5%") não tem
+  // como ser detectada com segurança por regex — cai como "registro" comum
+  // (fica salva no diário como texto, só não atualiza o progresso da obra).
   return {
     intencao: /quanto|resumo|total registrado/i.test(normalizar(texto)) ? "resumo" : "registro",
     tipo: classificarTipo(waType, texto),
     valor: extrairValor(texto),
+    progressoAbsoluto: null,
+    progressoIncremento: null,
     obra: encontrarObraNoTexto(texto, obras),
     resposta: null,
     transcricao: null,
@@ -215,9 +231,9 @@ async function obraAindaValida(sessao) {
 // empresa cadastrou no painel (instrucoesIADaEmpresa, logo abaixo).
 async function obrasNoEscopoDoTelefone(telefone, sessao) {
   if (await obraAindaValida(sessao)) {
-    const [obraDaSessao] = await sbAdmin(`obras?id=eq.${sessao.obra_id}&select=id,name,telefone,empresa_id`);
+    const [obraDaSessao] = await sbAdmin(`obras?id=eq.${sessao.obra_id}&select=id,name,telefone,empresa_id,progress`);
     if (obraDaSessao && obraDaSessao.empresa_id) {
-      return sbAdmin(`obras?empresa_id=eq.${obraDaSessao.empresa_id}&select=id,name,telefone,empresa_id`);
+      return sbAdmin(`obras?empresa_id=eq.${obraDaSessao.empresa_id}&select=id,name,telefone,empresa_id,progress`);
     }
   }
 
@@ -225,7 +241,7 @@ async function obrasNoEscopoDoTelefone(telefone, sessao) {
   // aqui (normalizando formatação/DDI/"9" extra) em vez de um "=eq." exato no
   // banco, que falhava sempre que o número foi digitado com formatação
   // diferente da que a Meta manda.
-  const todasComTelefone = await sbAdmin(`obras?telefone=not.is.null&select=id,name,telefone,empresa_id`);
+  const todasComTelefone = await sbAdmin(`obras?telefone=not.is.null&select=id,name,telefone,empresa_id,progress`);
   const porTelefone = (todasComTelefone || []).filter((o) => telefoneCorresponde(telefone, o.telefone));
   if (porTelefone.length === 0) {
     console.log(
@@ -239,7 +255,7 @@ async function obrasNoEscopoDoTelefone(telefone, sessao) {
   if (empresaIds.length === 1) {
     // Um único vínculo claro: abre para todas as obras dessa empresa (o
     // responsável de uma obra também pode lançar em outra obra da mesma empresa).
-    return sbAdmin(`obras?empresa_id=eq.${empresaIds[0]}&select=id,name,telefone,empresa_id`);
+    return sbAdmin(`obras?empresa_id=eq.${empresaIds[0]}&select=id,name,telefone,empresa_id,progress`);
   }
   // Esse número está cadastrado como responsável em mais de uma empresa ao
   // mesmo tempo (raro, mas possível). Para não misturar as duas, ficamos
@@ -404,6 +420,43 @@ export default async function handler(req, res) {
       if (obraAtual) {
         await sendText(telefone, await resumoDaObra(obraAtual));
         return res.status(200).send("resumo enviado");
+      }
+    }
+
+    // --- Atualização de progresso físico ("avançamos 5%", "a obra está 60% pronta") ---
+    if (interpretacao.intencao === "progresso") {
+      const sessaoValida = await obraAindaValida(sessao);
+      const obraAtual =
+        interpretacao.obra || (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null);
+      if (obraAtual) {
+        const progressoAtual = Number(obraAtual.progress) || 0;
+        let novoProgresso = progressoAtual;
+        if (interpretacao.progressoAbsoluto != null) {
+          novoProgresso = Math.max(0, Math.min(100, Math.round(interpretacao.progressoAbsoluto)));
+        } else if (interpretacao.progressoIncremento != null) {
+          novoProgresso = Math.max(0, Math.min(100, Math.round(progressoAtual + interpretacao.progressoIncremento)));
+        }
+        await sbAdmin(`obras?id=eq.${obraAtual.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ progress: novoProgresso }),
+        });
+        // Fica registrado no diário da obra também, como texto, para histórico.
+        await sbAdmin("registros", {
+          method: "POST",
+          body: JSON.stringify({
+            obra_id: obraAtual.id,
+            tipo: "texto",
+            conteudo: interpretacao.transcricao || conteudo || `Progresso atualizado para ${novoProgresso}%`,
+            remetente: telefone,
+            whatsapp_message_id: mensagem.id,
+          }),
+        }).catch(() => {});
+        await sendText(
+          telefone,
+          interpretacao.resposta ||
+            `Show! Atualizei o progresso da obra ${obraAtual.name} para ${novoProgresso}%.`
+        );
+        return res.status(200).send("progresso atualizado");
       }
     }
 
