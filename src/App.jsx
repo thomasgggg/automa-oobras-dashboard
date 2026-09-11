@@ -38,7 +38,7 @@ const OBRA_TABS = [
   { key: "orcamento", label: "Orçamento", icon: Wallet },
   { key: "gastos", label: "Gastos", icon: Coins },
   { key: "medicoes", label: "Medições", icon: Ruler },
-  { key: "turma", label: "Turma", icon: HardHat },
+  { key: "turma", label: "Planilha de Comprovante", icon: HardHat },
   { key: "cronograma", label: "Cronograma", icon: ListChecks },
   { key: "diario", label: "Diário de obra", icon: BookOpen },
   { key: "documentos", label: "Documentos", icon: Folder },
@@ -1191,7 +1191,7 @@ export default function CanteiroDashboard() {
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
                     <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: 15, fontWeight: 800, margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-                      <HardHat size={16} color={COLORS.amber} /> Turma — comprovantes de pagamento
+                      <HardHat size={16} color={COLORS.amber} /> Planilha de Comprovante — pagamentos à turma
                     </h3>
                     <button style={btnPrimary} onClick={() => setShowAddTurma(true)}><Plus size={16} /> Registrar pagamento</button>
                   </div>
