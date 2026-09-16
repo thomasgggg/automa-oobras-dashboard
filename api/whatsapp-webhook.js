@@ -203,6 +203,9 @@ async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType, i
         valor: iaResultado.valor ?? extrairValor(texto),
         progressoAbsoluto: iaResultado.progresso_absoluto ?? null,
         progressoIncremento: iaResultado.progresso_incremento ?? null,
+        trabalhador: iaResultado.trabalhador || null,
+        servico: iaResultado.servico || null,
+        formaPagamento: iaResultado.forma_pagamento || null,
         obra: obraEncontrada,
         resposta: iaResultado.resposta || null,
         transcricao: iaResultado.transcricao || null,
@@ -213,15 +216,21 @@ async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType, i
     console.error("Erro inesperado interpretando com IA, caindo para regras:", e.message || e);
   }
 
-  // Sem IA disponível, uma atualização de progresso ("avançamos 5%") não tem
-  // como ser detectada com segurança por regex — cai como "registro" comum
-  // (fica salva no diário como texto, só não atualiza o progresso da obra).
+  // Sem IA disponível, uma atualização de progresso ("avançamos 5%") ou um
+  // pagamento à turma não têm como ser detectados com segurança por regex —
+  // caem como "registro" comum (fica salvo no diário como texto, só não vira
+  // uma linha em pagamentos_turma nem atualiza o progresso da obra). Essa é
+  // uma funcionalidade que depende da IA estar configurada; sem ela, o
+  // comportamento é o mesmo de antes de existir "pagamento_turma".
   return {
     intencao: /quanto|resumo|total registrado/i.test(normalizar(texto)) ? "resumo" : "registro",
     tipo: classificarTipo(waType, texto),
     valor: extrairValor(texto),
     progressoAbsoluto: null,
     progressoIncremento: null,
+    trabalhador: null,
+    servico: null,
+    formaPagamento: null,
     obra: encontrarObraNoTexto(texto, obras),
     resposta: null,
     transcricao: null,
@@ -551,6 +560,59 @@ export default async function handler(req, res) {
             `Show! Atualizei o progresso da obra ${obraAtual.name} para ${novoProgresso}%.`
         );
         return res.status(200).send("progresso atualizado");
+      }
+    }
+
+    // --- Pagamento a alguém que trabalha na obra ("paguei 500 pro pedreiro") ---
+    // Vira uma linha na planilha "Turma" (pagamentos_turma), não só um texto
+    // solto no diário — é justamente essa separação (compra de material vs.
+    // pagamento a trabalhador) que motivou a aba existir.
+    if (interpretacao.intencao === "pagamento_turma" && interpretacao.valor != null) {
+      const sessaoValida = await obraAindaValida(sessao);
+      const obraAtual =
+        interpretacao.obra || (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null);
+      if (obraAtual) {
+        const trabalhador = interpretacao.trabalhador || "Não informado";
+        try {
+          await sbAdmin("pagamentos_turma", {
+            method: "POST",
+            body: JSON.stringify({
+              obra_id: obraAtual.id,
+              data: new Date().toISOString().slice(0, 10),
+              trabalhador,
+              servico: interpretacao.servico || null,
+              valor: interpretacao.valor,
+              forma_pagamento: interpretacao.formaPagamento || null,
+              observacao: interpretacao.transcricao || conteudo || null,
+            }),
+          });
+          // Fica registrado no diário da obra também, como texto (sem valor,
+          // para não contar em dobro na aba "Gastos") — serve de histórico e
+          // garante a idempotência (whatsapp_message_id) contra reenvio da Meta.
+          await sbAdmin("registros", {
+            method: "POST",
+            body: JSON.stringify({
+              obra_id: obraAtual.id,
+              tipo: "texto",
+              conteudo:
+                interpretacao.transcricao ||
+                conteudo ||
+                `Pagamento de R$ ${interpretacao.valor.toFixed(2)} para ${trabalhador}`,
+              remetente: telefone,
+              whatsapp_message_id: mensagem.id,
+            }),
+          }).catch(() => {});
+          await sendText(
+            telefone,
+            interpretacao.resposta ||
+              `Beleza! Registrei o pagamento de R$ ${interpretacao.valor.toFixed(2)} para ${trabalhador} na planilha de comprovante da obra ${obraAtual.name}.`
+          );
+          return res.status(200).send("pagamento turma registrado");
+        } catch (e) {
+          console.error("Não consegui salvar pagamento_turma (verifique se schema_medicoes_turma.sql já foi rodado):", e.message || e);
+          // Não retorna aqui: cai para o fluxo genérico abaixo, que ainda
+          // salva a mensagem no diário em vez de perdê-la.
+        }
       }
     }
 
