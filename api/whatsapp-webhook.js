@@ -63,19 +63,56 @@ function encontrarObraNoTexto(texto, obras) {
   return obras.find((o) => alvo.includes(normalizar(o.name))) || null;
 }
 
+// Palavras genéricas demais para contar como "identificação" de uma obra
+// quando comparamos por palavra (ver respostaCorrespondeObra abaixo). Sem
+// isso, uma resposta como "a obra" bateria com qualquer obra só por causa
+// da palavra "obra".
+const PALAVRAS_GENERICAS_OBRA = new Set([
+  "obra", "a", "o", "as", "os", "da", "do", "das", "dos", "de", "numero", "número", "nº", "no",
+  "essa", "esta", "aquela", "e",
+]);
+
+function tokensSignificativos(texto) {
+  return normalizar(texto)
+    .split(/[^a-z0-9]+/)
+    .filter((tok) => tok && !PALAVRAS_GENERICAS_OBRA.has(tok));
+}
+
+// Compara a resposta de alguém a "para qual obra é isso?" com um nome de
+// obra cadastrado, de forma tolerante a abreviações. `encontrarObraNoTexto`
+// (acima) só funciona quando a resposta contém o nome INTEIRO da obra — mas
+// é comum a pessoa encurtar o nome (ex.: responder "Obra 01" para uma obra
+// cadastrada como "Obra teste 01"), o que faz a checagem por substring falhar
+// mesmo a resposta claramente se referindo àquela obra. Aqui, além da
+// checagem por substring nos dois sentidos, também aceitamos quando todas as
+// palavras significativas da resposta (ignorando "obra", artigos, etc.)
+// aparecem entre as palavras do nome cadastrado.
+function respostaCorrespondeObra(texto, obra) {
+  const a = normalizar(texto);
+  const b = normalizar(obra.name);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const tokensResposta = tokensSignificativos(texto);
+  if (tokensResposta.length === 0) return false;
+  const tokensObra = tokensSignificativos(obra.name);
+  return tokensResposta.every((tok) => tokensObra.includes(tok));
+}
+
+// Só devolve uma obra quando exatamente uma bate com a resposta — se mais de
+// uma obra corresponder (nomes parecidos), é mais seguro pedir para a pessoa
+// ser mais específica do que arriscar associar ao registro errado.
+function encontrarObraNaResposta(texto, obras) {
+  const candidatas = obras.filter((o) => respostaCorrespondeObra(texto, o));
+  return candidatas.length === 1 ? candidatas[0] : null;
+}
+
 // Compara o nome de obra sugerido pela IA com as obras cadastradas de forma
 // tolerante: a IA às vezes devolve o nome com uma palavra a mais/a menos
 // (ex.: "Obra Viga" em vez de "Viga", ou o contrário) mesmo quando instruída
-// a copiar exatamente. Em vez de exigir igualdade exata, aceitamos também
-// quando um nome contém o outro por completo — evita falso-negativo sem
-// abrir margem para associar a uma obra errada (a comparação continua sendo
-// só dentro da lista já restrita à empresa do telefone).
-function obraCorresponde(nomeSugerido, obra) {
-  const a = normalizar(nomeSugerido);
-  const b = normalizar(obra.name);
-  if (!a || !b) return false;
-  return a === b || a.includes(b) || b.includes(a);
-}
+// a copiar exatamente. Reaproveita a mesma comparação tolerante usada para as
+// respostas de "para qual obra é isso?" (substring nos dois sentidos +
+// palavras significativas em comum) — mesma regra, um só lugar para manter.
+const obraCorresponde = respostaCorrespondeObra;
 
 // Compara dois telefones de forma tolerante a formatação. A Meta sempre manda
 // o número em E.164 sem "+" (ex.: 5511988887777), mas quem cadastra a obra no
@@ -190,6 +227,54 @@ async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType, i
     transcricao: null,
     viaIA: false,
   };
+}
+
+// Trava por telefone: impede que duas mensagens quase simultâneas do MESMO
+// número (a pessoa manda uma mensagem e, sem esperar resposta, já manda a
+// próxima; ou a Meta reenvia o mesmo webhook) sejam processadas em paralelo.
+// Sem isso, as duas chamadas leem o estado da sessão antes de qualquer uma
+// terminar de salvar, cada uma "acha" que não há obra definida ainda, e o
+// resultado são registros duplicados e a mesma pergunta ("para qual obra é
+// isso?") mandada duas vezes. Ver supabase/schema_whatsapp_lock.sql.
+//
+// Se a tabela/função ainda não existir (antes de rodar a migração) ou a
+// chamada falhar por qualquer motivo, seguimos sem trava (comportamento de
+// antes) em vez de travar a automação inteira por causa disso — a trava é
+// uma proteção extra, não um requisito para o webhook funcionar.
+async function tentarTravarTelefone(telefone) {
+  try {
+    const resultado = await sbAdmin("rpc/tentar_travar_telefone", {
+      method: "POST",
+      body: JSON.stringify({ p_telefone: telefone, p_ttl_segundos: 20 }),
+    });
+    return resultado === true;
+  } catch (e) {
+    console.error("Trava por telefone indisponível (seguindo sem trava):", e.message || e);
+    return true;
+  }
+}
+
+async function liberarTelefone(telefone) {
+  try {
+    await sbAdmin("rpc/liberar_travamento_telefone", {
+      method: "POST",
+      body: JSON.stringify({ p_telefone: telefone }),
+    });
+  } catch (e) {
+    // Não crítico: a trava expira sozinha pelo TTL mesmo se o DELETE falhar.
+  }
+}
+
+// Tenta travar por até ~3 segundos (8 tentativas de 400ms) antes de desistir
+// e seguir sem trava — é melhor arriscar um duplicado raro do que fazer a
+// pessoa esperar demais ou perder a mensagem.
+async function aguardarTravaTelefone(telefone, tentativas = 8, intervaloMs = 400) {
+  for (let i = 0; i < tentativas; i++) {
+    if (await tentarTravarTelefone(telefone)) return true;
+    await new Promise((resolve) => setTimeout(resolve, intervaloMs));
+  }
+  console.error("Não consegui obter trava exclusiva para o telefone; seguindo sem trava:", telefone);
+  return false;
 }
 
 async function getSessao(telefone) {
@@ -319,6 +404,7 @@ export default async function handler(req, res) {
     return res.status(400).send("payload invalido");
   }
 
+  let telefoneTravado = null;
   try {
     const value = body?.entry?.[0]?.changes?.[0]?.value;
     const mensagem = value?.messages?.[0];
@@ -328,6 +414,14 @@ export default async function handler(req, res) {
 
     const telefone = mensagem.from;
     const waType = mensagem.type;
+
+    // Trava por telefone ANTES de ler qualquer estado compartilhado (sessão,
+    // idempotência): garante que, se duas mensagens desse mesmo número
+    // chegarem quase juntas, a segunda espera a primeira terminar em vez de
+    // decidir com base em dados desatualizados. Ver comentário na definição
+    // de aguardarTravaTelefone.
+    const travou = await aguardarTravaTelefone(telefone);
+    if (travou) telefoneTravado = telefone;
 
     // Idempotência: a Meta pode reenviar o mesmo webhook.
     const jaExiste = await sbAdmin(
@@ -385,7 +479,7 @@ export default async function handler(req, res) {
 
     // --- Resposta a "para qual obra é isso?" ---
     if (sessao?.aguardando_obra && waType === "text") {
-      const obraEscolhida = encontrarObraNoTexto(conteudo, obras);
+      const obraEscolhida = encontrarObraNaResposta(conteudo, obras);
       if (obraEscolhida) {
         if (sessao.registro_pendente_id) {
           await sbAdmin(`registros?id=eq.${sessao.registro_pendente_id}`, {
@@ -519,5 +613,9 @@ export default async function handler(req, res) {
     console.error("Erro no webhook do WhatsApp:", err);
     // Sempre responder 200 para a Meta não ficar reenviando o mesmo evento em loop.
     return res.status(200).send("erro interno registrado no log");
+  } finally {
+    // Libera a trava do telefone (se conseguimos travá-lo) para que a
+    // próxima mensagem desse número não precise esperar o TTL inteiro.
+    if (telefoneTravado) await liberarTelefone(telefoneTravado);
   }
 }
