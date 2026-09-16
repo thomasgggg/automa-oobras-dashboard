@@ -31,9 +31,9 @@ const FUNCTION_DECLARATION = {
     properties: {
       intencao: {
         type: "string",
-        enum: ["registro", "resumo", "progresso", "outro"],
+        enum: ["registro", "pagamento_turma", "resumo", "progresso", "outro"],
         description:
-          "'registro' se a pessoa está relatando algo (gasto, foto, nota fiscal, atualização geral — inclusive quando isso é dito em um áudio). 'resumo' se está perguntando quanto já foi gasto/registrado até agora. 'progresso' se a pessoa está informando o andamento FÍSICO da obra em porcentagem (ex.: 'avançamos 5% essa semana', 'a obra está 60% pronta', 'terminamos a fundação, acho que uns 30%') — mesmo que também mencione outras coisas, se houver uma porcentagem de progresso da obra use 'progresso'. 'outro' para saudações, dúvidas genéricas, ou algo que não se encaixa nos casos acima.",
+          "'registro' se a pessoa está relatando algo (gasto com MATERIAL/fornecedor com nota fiscal, foto, documento, atualização geral — inclusive quando isso é dito em um áudio). 'pagamento_turma' se a pessoa está informando um PAGAMENTO A ALGUÉM QUE TRABALHA NA OBRA (um pedreiro, servente, ajudante, eletricista, encanador, empreiteiro, a 'turma') — ex.: 'paguei 500 pro pedreiro', 'passei um pix de 300 pro João pela pintura', 'paguei o empreendedor 1000'. A diferença para 'registro': aqui o dinheiro vai para uma PESSOA pelo trabalho dela, não para comprar um produto/material numa loja. Na dúvida entre os dois, se for citado um nome de pessoa, apelido ou função de trabalhador, prefira 'pagamento_turma'. 'resumo' se está perguntando quanto já foi gasto/registrado até agora. 'progresso' se a pessoa está informando o andamento FÍSICO da obra em porcentagem (ex.: 'avançamos 5% essa semana', 'a obra está 60% pronta', 'terminamos a fundação, acho que uns 30%') — mesmo que também mencione outras coisas, se houver uma porcentagem de progresso da obra use 'progresso'. 'outro' para saudações, dúvidas genéricas, ou algo que não se encaixa nos casos acima.",
       },
       tipo: {
         type: "string",
@@ -58,6 +58,24 @@ const FUNCTION_DECLARATION = {
         nullable: true,
         description:
           "Preencha SOMENTE quando intencao='progresso' e a pessoa disser quanto a obra AVANÇOU (não o total), ex.: 'avançamos 5% essa semana', 'progredimos mais 5%' -> 5. null nos outros casos, inclusive quando for um valor total (use progresso_absoluto nesse caso).",
+      },
+      trabalhador: {
+        type: "string",
+        nullable: true,
+        description:
+          "Preencha SOMENTE quando intencao='pagamento_turma': o nome ou a função de quem recebeu o pagamento (ex.: 'João', 'o pedreiro', 'o empreiteiro', 'a equipe da fundação'). null nos outros casos, ou se realmente não for possível identificar quem recebeu (nesse caso ainda assim use intencao='pagamento_turma' se ficar claro que é um pagamento a alguém da obra).",
+      },
+      servico: {
+        type: "string",
+        nullable: true,
+        description:
+          "Preencha SOMENTE quando intencao='pagamento_turma' e o serviço prestado for mencionado (ex.: 'pintura', 'alvenaria', 'instalação elétrica'). null se não for mencionado ou nos outros casos.",
+      },
+      forma_pagamento: {
+        type: "string",
+        nullable: true,
+        description:
+          "Preencha SOMENTE quando intencao='pagamento_turma' e a forma de pagamento for mencionada (ex.: 'Pix', 'dinheiro', 'transferência', 'cartão'). null se não for mencionada ou nos outros casos.",
       },
       obra_nome: {
         type: "string",
@@ -127,7 +145,10 @@ async function interpretarMensagem({ texto, waType, obras, audioBuffer, audioMim
     `"reais" na fala natural — se o contexto é de gasto/compra/pagamento numa obra, extraia ` +
     `o número mesmo assim; (2) se a pessoa falar uma porcentagem de quanto a obra avançou ou ` +
     `está, use intencao='progresso' e preencha progresso_absoluto (total) ou progresso_incremento ` +
-    `(quanto avançou), nunca os dois.`;
+    `(quanto avançou), nunca os dois; (3) pagamento a uma PESSOA que trabalha na obra (pedreiro, ` +
+    `servente, ajudante, empreiteiro, "a turma") é intencao='pagamento_turma', com o nome/função ` +
+    `dela em 'trabalhador' — isso é diferente de comprar material numa loja/fornecedor, que continua ` +
+    `sendo intencao='registro' com tipo='nota_fiscal'.`;
 
   const instrucao = temAudio
     ? `Mensagem de ÁUDIO recebida por WhatsApp. Ouça o áudio anexado e extraia os dados.\n\n` +
