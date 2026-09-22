@@ -641,7 +641,7 @@ export default function CanteiroDashboard() {
 
   const totalGasto = Object.values(stats).reduce((s, x) => s + x.spent, 0);
   const emRisco = obras.filter((o) => stats[o.id]?.status.key === "risco").length;
-
+    const registrosSemObra = useMemo(() => registros.filter((r) => !r.obraId), [registros]); async function associarRegistroObra(registroId, obraId) { try { await call(`registros?id=eq.${registroId}`, { method: "PATCH", body: JSON.stringify({ obra_id: obraId }) }); loadData(); } catch (e) { setError(e.message || "Não consegui associar o registro a uma obra."); } }
   async function addObra() {
     // Orçamento é opcional — muita gente começa a obra sem ter um valor fechado ainda.
     if (!obraForm.name.trim()) return;
@@ -997,7 +997,8 @@ export default function CanteiroDashboard() {
             <StatCard icon={<AlertTriangle size={16} />} label="Em risco" value={emRisco} tone={emRisco > 0 ? COLORS.red : COLORS.green} />
           </div>
 
-          {obras.length === 0 ? (
+        {registrosSemObra.length > 0 && (<div style={{ border: `1px solid ${COLORS.amber}55`, background: COLORS.amber + "14", borderRadius: 16, padding: 18, marginBottom: 24 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}><AlertTriangle size={16} color={COLORS.amber} /><p style={{ fontFamily: "'Inter', sans-serif", fontSize: 14, fontWeight: 800, margin: 0 }}>{registrosSemObra.length} registro{registrosSemObra.length !== 1 ? "s" : ""} do WhatsApp sem obra definida</p></div><p style={{ color: COLORS.inkMuted, fontSize: 12, margin: "0 0 12px" }}>Acontece quando quem manda a mensagem não responde "para qual obra é isso?". Escolha a obra certa para cada um abaixo.</p><div style={{ display: "flex", flexDirection: "column", gap: 8 }}>{registrosSemObra.map((r) => (<div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: "8px 10px", flexWrap: "wrap" }}><span style={{ flex: 1, minWidth: 160, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.conteudo || r.tipo.replace("_", " ")}</span><span style={{ fontSize: 11, color: COLORS.inkMuted, whiteSpace: "nowrap" }}>{formatDateAnyBR(r.criadoEm)}</span><select style={{ ...inputStyle, width: 180 }} defaultValue="" onChange={(e) => { if (e.target.value) associarRegistroObra(r.id, e.target.value); }}><option value="" disabled>Escolher obra...</option>{obras.map((o) => (<option key={o.id} value={o.id}>{o.name}</option>))}</select></div>))}</div></div>)}
+        {obras.length === 0 ? (
             <div style={{ border: `1px dashed ${COLORS.line}`, background: COLORS.panel, borderRadius: 16, padding: 40, textAlign: "center" }}>
               <Building2 size={28} color={COLORS.inkMuted} style={{ marginBottom: 12 }} />
               <p style={{ fontFamily: "'Inter', sans-serif", fontSize: 16, fontWeight: 700, margin: "0 0 6px" }}>Cadastre sua primeira obra</p>
