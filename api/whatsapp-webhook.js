@@ -87,13 +87,23 @@ function tokensSignificativos(texto) {
 // checagem por substring nos dois sentidos, também aceitamos quando todas as
 // palavras significativas da resposta (ignorando "obra", artigos, etc.)
 // aparecem entre as palavras do nome cadastrado.
+//
+// IMPORTANTE: a checagem de "palavras significativas" precisa vir ANTES da
+// checagem por substring, não depois. Motivo: quase todo nome de obra contém
+// a própria palavra "obra" (ex.: "Obra teste 01"), então uma resposta que é
+// só essa palavra genérica ("obra", "essa", "sim"...) seria uma substring de
+// QUALQUER nome que contenha "obra" — e por causa da ordem antiga, isso batia
+// como se fosse uma identificação válida (bug real: empresas com uma única
+// obra cadastrada teriam a mensagem "associada" só por a pessoa responder
+// "obra"). Rejeitando primeiro respostas sem nenhuma palavra significativa,
+// isso nunca chega a acontecer.
 function respostaCorrespondeObra(texto, obra) {
   const a = normalizar(texto);
   const b = normalizar(obra.name);
   if (!a || !b) return false;
-  if (a === b || a.includes(b) || b.includes(a)) return true;
   const tokensResposta = tokensSignificativos(texto);
   if (tokensResposta.length === 0) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
   const tokensObra = tokensSignificativos(obra.name);
   return tokensResposta.every((tok) => tokensObra.includes(tok));
 }
@@ -146,14 +156,22 @@ function telefoneCorresponde(a, b) {
 // Extrai um valor em reais do texto (usado no parser por regras, quando a IA
 // não está disponível). Na fala/escrita natural quase ninguém escreve "R$" ou
 // "reais" — por isso, além do formato explícito, também aceitamos um número
-// logo após um verbo comum de gasto ("gastei 350 no cimento").
+// logo após um verbo comum de gasto ("gastei 350 no cimento", "a nota deu
+// 89,90", "ficou em 500"). A ordem dos verbos importa: variantes de duas
+// palavras (ex.: "foi de", "ficou em") vêm antes da variante curta
+// equivalente ("foi", "ficou") para serem tentadas primeiro pelo regex.
 function extrairValor(texto) {
   const t = texto || "";
   const numero = "([\\d.]+,\\d{2}|\\d+(?:\\.\\d{3})*)"; // 350 | 1.200 | 89,90
   let match =
     t.match(new RegExp(`r\\$\\s*${numero}`, "i")) ||
     t.match(new RegExp(`${numero}\\s*reais`, "i")) ||
-    t.match(new RegExp(`(?:gastei|paguei|custou|comprei por|saiu por|foi)\\s*${numero}`, "i"));
+    t.match(
+      new RegExp(
+        `(?:gastei|paguei|custou|comprei por|saiu por|foi de|foi|deu|ficou em|ficou)\\s*${numero}`,
+        "i"
+      )
+    );
   if (!match) return null;
   const num = match[1].replace(/\./g, "").replace(",", ".");
   const valor = parseFloat(num);
