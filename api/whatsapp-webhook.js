@@ -217,7 +217,23 @@ function classificarTipo(waType, conteudo) {
   if (waType === "image") return pareceNota ? "nota_fiscal" : "foto";
   if (waType === "document") return pareceNota ? "nota_fiscal" : "documento";
   if (waType === "audio") return "audio";
+  if (waType === "location") return "localizacao";
+  if (waType === "sticker") return "figurinha";
   return "texto";
+}
+
+// Monta um texto legível (com link do Google Maps) a partir do objeto
+// "location" que a Meta manda — antes essas mensagens eram descartadas
+// (ver o "else" mais abaixo, que ainda cobre os tipos realmente não
+// tratados), o que fazia uma localização compartilhada pelo WhatsApp (ex.:
+// "cheguei, é aqui") simplesmente sumir sem virar registro nenhum na obra.
+function textoDaLocalizacao(location) {
+  const loc = location || {};
+  const { latitude, longitude, name, address } = loc;
+  const linkMaps = latitude != null && longitude != null ? `https://maps.google.com/?q=${latitude},${longitude}` : null;
+  const legenda = [name, address].filter(Boolean).join(" - ");
+  if (legenda && linkMaps) return `${legenda} (${linkMaps})`;
+  return legenda || linkMaps || "Localização compartilhada";
 }
 
 // Detecta menção a alguém que trabalha na obra, usado no parser por regras
@@ -572,8 +588,17 @@ export default async function handler(req, res) {
       conteudo = mensagem.document?.caption || mensagem.document?.filename || "";
       mediaId = mensagem.document?.id;
       mimeType = mensagem.document?.mime_type;
+    } else if (waType === "location") {
+      // Sem mídia para baixar aqui — o valor útil é a coordenada em si,
+      // guardada como texto (com link do Google Maps) no diário da obra.
+      conteudo = textoDaLocalizacao(mensagem.location);
+    } else if (waType === "sticker") {
+      // Figurinha não carrega informação (material, valor, obra) para a IA
+      // interpretar, então só marcamos a presença dela no diário — sem
+      // baixar/guardar o arquivo, que é só decorativo.
+      conteudo = "Figurinha recebida";
     } else {
-      // Tipo não suportado ainda (localização, figurinha, etc.)
+      // Tipo ainda não suportado (ex.: contato, reação, enquete).
       await sendText(telefone, "Recebi sua mensagem, mas esse tipo de conteúdo ainda não é organizado automaticamente.");
       return res.status(200).send("tipo nao suportado");
     }
@@ -762,6 +787,8 @@ export default async function handler(req, res) {
         audio: `Áudio recebido e salvo no histórico da obra ${obra.name}.`,
         documento: `Documento anexado e salvo no histórico da obra ${obra.name}.`,
         texto: `Anotado na obra ${obra.name}.`,
+        localizacao: `Localização recebida e salva no histórico da obra ${obra.name}.`,
+        figurinha: `Figurinha recebida e salva no histórico da obra ${obra.name}.`,
       };
       // Usa a resposta natural da IA quando disponível; senão, a mensagem fixa de sempre.
       await sendText(telefone, interpretacao.resposta || respostasPadrao[tipo]);
