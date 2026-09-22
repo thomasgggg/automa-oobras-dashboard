@@ -328,6 +328,23 @@ export default function CanteiroDashboard() {
   const [iaError, setIaError] = useState("");
   const [iaSalvo, setIaSalvo] = useState(false);
 
+  // Número de WhatsApp do próprio assistente de IA (para onde as pessoas da
+  // obra mandam mensagem) — resolvido via /api/numero-ia a partir do
+  // META_PHONE_NUMBER_ID (um ID interno da Meta, sem relação visual com o
+  // número real). Mostrado no mesmo painel "Assistente de IA" para quem for
+  // configurar um número novo saber para qual WhatsApp direcionar a equipe.
+  const [numeroIA, setNumeroIA] = useState(null);
+  const [numeroIALoading, setNumeroIALoading] = useState(false);
+  const [numeroIAError, setNumeroIAError] = useState("");
+
+  // Edição do WhatsApp cadastrado em cada obra, direto do painel "Assistente
+  // de IA" — antes só dava para definir esse número na criação da obra; se o
+  // responsável trocasse de número, não havia como atualizar sem mexer no
+  // banco na mão.
+  const [telefoneEdits, setTelefoneEdits] = useState({});
+  const [telefoneSalvandoId, setTelefoneSalvandoId] = useState(null);
+  const [telefoneSalvoId, setTelefoneSalvoId] = useState(null);
+
   useEffect(() => {
     try {
       const saved = localStorage.getItem(SESSION_KEY);
@@ -428,6 +445,8 @@ export default function CanteiroDashboard() {
     setIaError("");
     setIaSalvo(false);
     setIaLoading(true);
+    setTelefoneEdits(Object.fromEntries(obras.map((o) => [o.id, o.telefone || ""])));
+    setTelefoneSalvoId(null);
     try {
       const rows = await call(`empresas?id=eq.${session.empresa.id}&select=instrucoes_ia`);
       setIaInstrucoes((rows && rows[0] && rows[0].instrucoes_ia) || "");
@@ -435,6 +454,38 @@ export default function CanteiroDashboard() {
       setIaError(e.message || "Não consegui carregar as instruções salvas.");
     }
     setIaLoading(false);
+
+    // Busca à parte (não trava o resto do painel se a Graph API falhar ou
+    // as credenciais da Meta ainda não estiverem configuradas).
+    setNumeroIALoading(true);
+    setNumeroIAError("");
+    try {
+      const res = await fetch("/api/numero-ia");
+      const data = await res.json();
+      if (!res.ok || !data.numero) throw new Error(data.erro || "Não consegui consultar o número da IA.");
+      setNumeroIA(data);
+    } catch (e) {
+      setNumeroIAError(e.message || "Não consegui consultar o número da IA.");
+    }
+    setNumeroIALoading(false);
+  }
+
+  // Atualiza o WhatsApp cadastrado de uma obra (usado pelo webhook para
+  // reconhecer de quem é cada mensagem recebida). Não afeta o número da IA em
+  // si — só o telefone que já era usado para IDENTIFICAR a obra ao receber
+  // uma mensagem, ver obrasNoEscopoDoTelefone em api/whatsapp-webhook.js.
+  async function salvarTelefoneObra(obraId) {
+    const novo = (telefoneEdits[obraId] || "").trim();
+    setTelefoneSalvandoId(obraId);
+    setTelefoneSalvoId(null);
+    try {
+      await call(`obras?id=eq.${obraId}`, { method: "PATCH", body: JSON.stringify({ telefone: novo || null }) });
+      setObras((prev) => prev.map((o) => (o.id === obraId ? { ...o, telefone: novo } : o)));
+      setTelefoneSalvoId(obraId);
+    } catch (e) {
+      setError(e.message || "Não consegui atualizar o WhatsApp da obra.");
+    }
+    setTelefoneSalvandoId(null);
   }
 
   async function salvarInstrucoesIA() {
@@ -490,7 +541,7 @@ export default function CanteiroDashboard() {
       const rawObras = await call("obras?select=*&order=start_date.desc");
       const rawEntries = await call("materiais?select=*");
       setObras(
-        rawObras.map((o) => ({ id: o.id, name: o.name, budget: Number(o.budget), deadline: o.deadline, startDate: o.start_date, progress: o.progress }))
+        rawObras.map((o) => ({ id: o.id, name: o.name, budget: Number(o.budget), deadline: o.deadline, startDate: o.start_date, progress: o.progress, telefone: o.telefone || "" }))
       );
       setEntries(
         rawEntries.map((e) => ({ id: e.id, obraId: e.obra_id, material: e.material, quantity: e.quantity, unit: e.unit, value: Number(e.value), date: e.date, stage: e.stage }))
@@ -1408,6 +1459,55 @@ export default function CanteiroDashboard() {
               ensinar preferências do seu negócio — apelidos de material, forma de responder, o que priorizar.
               Isso é somado às regras fixas de segurança (a IA nunca vê dados de outra empresa nem inventa obra).
             </p>
+
+            <div style={{ background: COLORS.indigoSoft || COLORS.greenSoft, border: `1px solid ${COLORS.indigo}33`, borderRadius: 12, padding: "12px 14px" }}>
+              <label style={{ ...labelStyle, marginBottom: 4 }}>Número de WhatsApp da IA</label>
+              {numeroIALoading ? (
+                <p style={{ margin: 0, fontSize: 13, color: COLORS.inkMuted }}>Consultando...</p>
+              ) : numeroIAError ? (
+                <p style={{ margin: 0, fontSize: 12, color: COLORS.red }}>{numeroIAError}</p>
+              ) : (
+                <p style={{ margin: 0, fontSize: 17, fontWeight: 800 }}>{numeroIA?.numero || "—"}</p>
+              )}
+              <p style={{ color: COLORS.inkMuted, fontSize: 12, margin: "4px 0 0" }}>
+                É esse o número que cada responsável de obra deve salvar e usar para mandar mensagens (nota fiscal, progresso, pagamento à equipe etc).
+              </p>
+            </div>
+
+            <div>
+              <label style={labelStyle}>WhatsApp cadastrado em cada obra</label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {obras.length === 0 ? (
+                  <p style={{ color: COLORS.inkMuted, fontSize: 13, margin: 0 }}>Nenhuma obra cadastrada ainda.</p>
+                ) : (
+                  obras.map((o) => (
+                    <div key={o.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, minWidth: 110, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {o.name}
+                      </span>
+                      <input
+                        style={{ ...inputStyle, flex: 1 }}
+                        placeholder="5511999999999"
+                        value={telefoneEdits[o.id] ?? ""}
+                        onChange={(e) => { setTelefoneEdits({ ...telefoneEdits, [o.id]: e.target.value }); setTelefoneSalvoId(null); }}
+                      />
+                      <button
+                        style={{ ...btnGhost, padding: "8px 12px", opacity: telefoneSalvandoId === o.id ? 0.6 : 1 }}
+                        onClick={() => salvarTelefoneObra(o.id)}
+                        disabled={telefoneSalvandoId === o.id}
+                      >
+                        {telefoneSalvoId === o.id ? <CheckCircle2 size={16} color={COLORS.green} /> : telefoneSalvandoId === o.id ? "Salvando..." : "Salvar"}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+              <p style={{ color: COLORS.inkMuted, fontSize: 12, margin: "6px 0 0" }}>
+                Troque aqui se o responsável pela obra mudar de número de celular — sem isso, mensagens do número
+                antigo continuam sendo reconhecidas e as do número novo não são associadas a nenhuma obra.
+              </p>
+            </div>
+
             {iaLoading ? (
               <p style={{ color: COLORS.inkMuted, fontSize: 13 }}>Carregando...</p>
             ) : (
