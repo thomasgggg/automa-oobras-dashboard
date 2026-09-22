@@ -566,6 +566,7 @@ export default function CanteiroDashboard() {
           mediaUrl: r.media_url,
           remetente: r.remetente,
           criadoEm: r.criado_em,
+          viaIA: r.via_ia,
         }))
       );
     } catch (e) {
@@ -827,6 +828,7 @@ export default function CanteiroDashboard() {
       valor: r.valor,
       data: r.criadoEm,
       ordenacao: r.criadoEm,
+      viaIA: r.viaIA,
     }));
     return [...doMaterial, ...doRegistro]
       .filter((item) => !busca.trim() || `${item.titulo} ${item.subtitulo}`.toLowerCase().includes(busca.toLowerCase()))
@@ -1349,8 +1351,13 @@ export default function CanteiroDashboard() {
                           <div key={item.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 16px", borderTop: i === 0 ? "none" : `1px solid ${COLORS.line}` }}>
                             <Icone size={16} color={COLORS.green} style={{ marginTop: 2 }} />
                             <div style={{ flex: 1 }}>
-                              <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                                <span style={{ fontSize: 13, fontWeight: 700, textTransform: "capitalize" }}>{item.titulo}</span>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <span style={{ fontSize: 13, fontWeight: 700, textTransform: "capitalize" }}>{item.titulo}</span>
+                                  {item.viaIA != null && (
+                                    <Badge label={item.viaIA ? "IA" : "regras"} tone={item.viaIA ? COLORS.indigo : COLORS.amber} />
+                                  )}
+                                </span>
                                 <span style={{ fontSize: 11, color: COLORS.inkMuted }}>{item.data ? formatDateAnyBR(item.data) : ""}</span>
                               </div>
                               {item.subtitulo && <p style={{ margin: "4px 0 0", fontSize: 13, color: COLORS.inkMuted }}>{item.subtitulo}</p>}
@@ -1486,8 +1493,7 @@ export default function CanteiroDashboard() {
                         {o.name}
                       </span>
                       <input
-                        style={{ ...inputStyle, flex: 1 }}
-                        placeholder="5511999999999"
+                        placeholder="5511999999999, 5511988887777"
                         value={telefoneEdits[o.id] ?? ""}
                         onChange={(e) => { setTelefoneEdits({ ...telefoneEdits, [o.id]: e.target.value }); setTelefoneSalvoId(null); }}
                       />
@@ -1504,7 +1510,9 @@ export default function CanteiroDashboard() {
               </div>
               <p style={{ color: COLORS.inkMuted, fontSize: 12, margin: "6px 0 0" }}>
                 Troque aqui se o responsável pela obra mudar de número de celular — sem isso, mensagens do número
-                antigo continuam sendo reconhecidas e as do número novo não são associadas a nenhuma obra.
+                antigo continuam sendo reconhecidas e as do número novo não são associadas a nenhuma obra. Para mais
+                                de uma pessoa acompanhar a mesma obra pelo WhatsApp (ex.: mestre de obra e dono), separe os números              
+                por vírgula.
               </p>
             </div>
 
@@ -1558,8 +1566,8 @@ export default function CanteiroDashboard() {
               <input style={inputStyle} type="date" value={obraForm.deadline} onChange={(e) => setObraForm({ ...obraForm, deadline: e.target.value })} />
             </div>
             <div>
-              <label style={labelStyle}>WhatsApp do responsável (para receber alertas e registros)</label>
-              <input style={inputStyle} placeholder="5511999999999" value={obraForm.telefone} onChange={(e) => setObraForm({ ...obraForm, telefone: e.target.value })} />
+              <label style={labelStyle}>WhatsApp do responsável (para receber alertas e registros) · pode colocar mais de um separado por vírgula</label>
+              <input style={inputStyle} placeholder="5511999999999, 5511988887777" value={obraForm.telefone} onChange={(e) => setObraForm({ ...obraForm, telefone: e.target.value })} />
             </div>
             <button style={{ ...btnPrimary, justifyContent: "center", marginTop: 6 }} onClick={addObra}>Cadastrar obra</button>
           </div>
