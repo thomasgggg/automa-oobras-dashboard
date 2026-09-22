@@ -143,7 +143,7 @@ function chaveTelefoneBR(t) {
   return d.length >= 10 ? d.slice(-10) : d;
 }
 
-function telefoneCorresponde(a, b) {
+function telefoneUnicoCorresponde(a, b) {
   if (!a || !b) return false;
   const ka = chaveTelefoneBR(a);
   const kb = chaveTelefoneBR(b);
@@ -151,6 +151,19 @@ function telefoneCorresponde(a, b) {
   // Reserva para números fora do padrão BR (outro DDI, tamanho diferente):
   // compara os dígitos completos, sem tentar remover DDI/9.
   return normalizarTelefone(a) === normalizarTelefone(b);
+}
+
+// `b` (o telefone cadastrado na obra) pode conter mais de um número separado
+// por vírgula ou ponto e vírgula — ex.: "5511999998888, 5511977776666" para o
+// mestre de obra E o dono acompanharem a mesma obra pelo WhatsApp. Sem isso,
+// só o primeiro/único número cadastrado conseguia mandar mensagem para a obra.
+function telefoneCorresponde(a, b) {
+  if (!a || !b) return false;
+  return String(b)
+    .split(/[,;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .some((numero) => telefoneUnicoCorresponde(a, numero));
 }
 
 // Extrai um valor em reais do texto (usado no parser por regras, quando a IA
@@ -162,6 +175,26 @@ function telefoneCorresponde(a, b) {
 // equivalente ("foi", "ficou") para serem tentadas primeiro pelo regex.
 function extrairValor(texto) {
   const t = texto || "";
+
+  // "2 mil", "1,5 mil", ou só "mil" (sem número na frente) — forma comum de
+  // falar valores redondos em voz/texto informal ("gastei 2 mil no cimento",
+  // "paguei mil no frete"). Sem isso, o padrão de dígitos abaixo capturava só
+  // o "2" antes de " mil" e o valor saía 1000x menor do que o real. Checado
+  // ANTES do padrão de dígitos por causa disso.
+  const numeroMil = "(\\d+(?:[.,]\\d+)?)?\\s*mil\\b";
+  const matchMil =
+    t.match(new RegExp(`r\\$\\s*${numeroMil}`, "i")) ||
+    t.match(
+      new RegExp(
+        `(?:gastei|paguei|custou|comprei por|saiu por|foi de|foi|deu|ficou em|ficou)\\s*${numeroMil}`,
+        "i"
+      )
+    );
+  if (matchMil) {
+    const baseMil = matchMil[1] != null ? parseFloat(matchMil[1].replace(",", ".")) : 1;
+    if (!isNaN(baseMil)) return baseMil * 1000;
+  }
+
   const numero = "([\\d.]+,\\d{2}|\\d+(?:\\.\\d{3})*)"; // 350 | 1.200 | 89,90
   let match =
     t.match(new RegExp(`r\\$\\s*${numero}`, "i")) ||
@@ -622,6 +655,7 @@ export default async function handler(req, res) {
             conteudo: interpretacao.transcricao || conteudo || `Progresso atualizado para ${novoProgresso}%`,
             remetente: telefone,
             whatsapp_message_id: mensagem.id,
+            via_ia: interpretacao.viaIA,
           }),
         }).catch(() => {});
         await sendText(
@@ -670,6 +704,7 @@ export default async function handler(req, res) {
                 `Pagamento de R$ ${interpretacao.valor.toFixed(2)} para ${trabalhador}`,
               remetente: telefone,
               whatsapp_message_id: mensagem.id,
+              via_ia: interpretacao.viaIA,
             }),
           }).catch(() => {});
           await sendText(
@@ -715,6 +750,7 @@ export default async function handler(req, res) {
         media_mime: mimeType,
         remetente: telefone,
         whatsapp_message_id: mensagem.id,
+        via_ia: interpretacao.viaIA,
       }),
     });
 
