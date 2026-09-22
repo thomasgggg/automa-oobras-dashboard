@@ -176,23 +176,36 @@ async function interpretarMensagem({ texto, waType, obras, audioBuffer, audioMim
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
+  const chamarGemini = () =>
+    fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts }],
+        tools: [{ function_declarations: [FUNCTION_DECLARATION] }],
+        tool_config: {
+          function_calling_config: { mode: "ANY", allowed_function_names: [FUNCTION_DECLARATION.name] },
+        },
+        generationConfig: { temperature: 0 },
+      }),
+      signal: controller.signal,
+    });
+
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts }],
-          tools: [{ function_declarations: [FUNCTION_DECLARATION] }],
-          tool_config: {
-            function_calling_config: { mode: "ANY", allowed_function_names: [FUNCTION_DECLARATION.name] },
-          },
-          generationConfig: { temperature: 0 },
-        }),
-        signal: controller.signal,
-      }
-    );
+    let res = await chamarGemini();
+
+    // A Gemini às vezes devolve 503 ("sobrecarregada, tente de novo mais
+    // tarde") ou 429 (limite de taxa) — erros passageiros que na prática já
+    // não acontecem meio segundo depois na tentativa seguinte. Isso já
+    // aconteceu em produção e fez mensagens de pagamento/progresso caírem
+    // para o parser por regras sem necessidade. Vale a pena tentar mais uma
+    // vez antes de desistir: meio segundo de espera é bem melhor do que
+    // perder a interpretação da mensagem.
+    if (!res.ok && (res.status === 503 || res.status === 429)) {
+      console.error(`Gemini devolveu ${res.status}, tentando mais uma vez em 600ms...`);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      res = await chamarGemini();
+    }
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
