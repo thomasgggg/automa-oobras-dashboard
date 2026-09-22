@@ -187,6 +187,45 @@ function classificarTipo(waType, conteudo) {
   return "texto";
 }
 
+// Detecta menção a alguém que trabalha na obra, usado no parser por regras
+// como pista de que um pagamento é para uma PESSOA (turma) e não para compra
+// de material — a mesma distinção que a IA faz (ver ia.js). Isso existe
+// porque a IA pode falhar numa hora específica (ex.: a Gemini às vezes
+// devolve erro 503 "sobrecarregada", o que já aconteceu em produção) e,
+// antes desta função, uma mensagem como "paguei 500 pro pedreiro" nesse
+// momento virava um registro comum em vez de ir para a planilha de
+// comprovante — a funcionalidade parecia "não funcionar" só por causa de uma
+// falha passageira da IA.
+const PALAVRAS_TRABALHADOR =
+  /\b(pedreiro|pedreira|servente|ajudante|encanador|eletricista|empreiteiro|pintor|pintora|carpinteiro|marceneiro|mestre de obra|diarista|empreendedor)\b/;
+
+function detectarTrabalhador(texto) {
+  const match = normalizar(texto).match(PALAVRAS_TRABALHADOR);
+  if (!match) return null;
+  const palavra = match[0];
+  return palavra.charAt(0).toUpperCase() + palavra.slice(1);
+}
+
+// Detecta uma atualização de progresso físico ("avançamos 5%", "a obra está
+// 60% pronta") no parser por regras, pelo mesmo motivo de detectarTrabalhador
+// acima: sem isso, uma falha pontual da IA fazia o percentual da obra nunca
+// ser atualizado, mesmo a pessoa tendo mandado a informação certinha.
+// Distingue incremento ("avançamos", "progredimos", "subiu", "aumentou" antes
+// do número) de valor absoluto (qualquer outro caso, ex.: "está 60% pronta").
+function detectarProgresso(texto) {
+  const t = normalizar(texto);
+  // Uma porcentagem de desconto/juros/imposto não é progresso da obra — sem
+  // essa checagem, "consegui 15% de desconto no cimento" seria interpretado
+  // como se a obra tivesse avançado 15%.
+  if (/desconto|abatimento|imposto|juros|taxa de/.test(t)) return null;
+  const match = t.match(/(\d{1,3})\s*%/);
+  if (!match) return null;
+  const numero = Math.max(0, Math.min(100, parseInt(match[1], 10)));
+  const antes = t.slice(0, match.index);
+  const pareceIncremento = /avanc|progred|subiu|aumentou/.test(antes);
+  return pareceIncremento ? { absoluto: null, incremento: numero } : { absoluto: numero, incremento: null };
+}
+
 // Interpreta o conteúdo da mensagem: tenta a IA primeiro (entende sinônimos,
 // erros de digitação, frases fora do padrão, e até áudio — o Gemini "ouve" a
 // nota de voz direto, sem transcrição separada), e cai para o parser antigo
@@ -234,19 +273,32 @@ async function interpretar({ texto, waType, obras, audioBuffer, audioMimeType, i
     console.error("Erro inesperado interpretando com IA, caindo para regras:", e.message || e);
   }
 
-  // Sem IA disponível, uma atualização de progresso ("avançamos 5%") ou um
-  // pagamento à turma não têm como ser detectados com segurança por regex —
-  // caem como "registro" comum (fica salvo no diário como texto, só não vira
-  // uma linha em pagamentos_turma nem atualiza o progresso da obra). Essa é
-  // uma funcionalidade que depende da IA estar configurada; sem ela, o
-  // comportamento é o mesmo de antes de existir "pagamento_turma".
+  // Sem IA disponível (não configurada, ou uma falha pontual como um 503 de
+  // sobrecarga do Gemini), tenta detectar progresso e pagamento_turma também
+  // por palavras-chave — de forma mais limitada que a IA (não entende
+  // sinônimos nem frases fora do padrão), mas evita que essas duas
+  // funcionalidades fiquem completamente fora do ar só por causa de uma
+  // instabilidade momentânea da IA numa mensagem específica.
+  const progressoDetectado = detectarProgresso(texto);
+  const trabalhadorDetectado = detectarTrabalhador(texto);
+  const valorFallback = extrairValor(texto);
+
+  let intencaoFallback = "registro";
+  if (progressoDetectado) {
+    intencaoFallback = "progresso";
+  } else if (trabalhadorDetectado && valorFallback != null) {
+    intencaoFallback = "pagamento_turma";
+  } else if (/quanto|resumo|total registrado/i.test(normalizar(texto))) {
+    intencaoFallback = "resumo";
+  }
+
   return {
-    intencao: /quanto|resumo|total registrado/i.test(normalizar(texto)) ? "resumo" : "registro",
+    intencao: intencaoFallback,
     tipo: classificarTipo(waType, texto),
-    valor: extrairValor(texto),
-    progressoAbsoluto: null,
-    progressoIncremento: null,
-    trabalhador: null,
+    valor: valorFallback,
+    progressoAbsoluto: progressoDetectado ? progressoDetectado.absoluto : null,
+    progressoIncremento: progressoDetectado ? progressoDetectado.incremento : null,
+    trabalhador: trabalhadorDetectado,
     servico: null,
     formaPagamento: null,
     obra: encontrarObraNoTexto(texto, obras),
