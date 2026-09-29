@@ -275,6 +275,40 @@ function detectarProgresso(texto) {
   return pareceIncremento ? { absoluto: null, incremento: numero } : { absoluto: numero, incremento: null };
 }
 
+// Detecta uma saudação pura ("oi", "bom dia"...) ou um pedido de ajuda
+// ("como funciona", "não entendi", "menu"...). Existe por dois motivos reais
+// observados em teste: (1) sem isso, um simples "oi" virava uma tentativa de
+// REGISTRO sem obra associada, e a pessoa caía direto em "para qual obra é
+// esse registro?" sem nunca ter recebido nenhuma instrução de uso; (2) uma
+// vez que a sessão fica "aguardando_obra" (ver mais abaixo), toda mensagem —
+// inclusive um pedido de ajuda — era comparada apenas contra os nomes de
+// obra cadastrados, então perguntas como "você está entendendo?" ou "me
+// ajude a usar" só repetiam "Não encontrei essa obra" para sempre, sem
+// nenhuma saída. Este detector roda ANTES da checagem de aguardando_obra
+// (mais abaixo) exatamente para poder interromper esse loop.
+const PADRAO_SAUDACAO = /^(oi+|ola|eae|e ai|opa|bom dia|boa tarde|boa noite)[\s!.]*$/;
+const PADRAO_AJUDA =
+  /\b(ajuda|ajude|menu|instrucoes|instrucao|como (funciona|funciono|usar|uso|te uso|utilizar)|nao entendi|nao entendo|o que (voce|vc) faz|comandos|tutorial)\b/;
+
+function pedeAjudaOuSaudacao(texto) {
+  const t = normalizar(texto).trim();
+  if (!t) return false;
+  return PADRAO_SAUDACAO.test(t) || PADRAO_AJUDA.test(t);
+}
+
+function mensagemDeAjuda(obras) {
+  const nomesObras = obras.map((o) => o.name).join(", ") || "(nenhuma obra cadastrada ainda)";
+  return (
+    `Oi! Sou o assistente da Viga Automações. Aqui você pode, a qualquer momento:\n` +
+    `• Mandar um gasto: "gastei 350 no cimento" ou uma foto da nota fiscal\n` +
+    `• Contar o andamento: "avançamos 5%" ou "a obra está 60% pronta"\n` +
+    `• Registrar pagamento a alguém da equipe: "paguei 200 pro pedreiro"\n` +
+    `• Perguntar o total já gasto: "quanto já foi registrado?"\n` +
+    `• Mandar foto, áudio, documento ou localização — tudo fica salvo no histórico\n\n` +
+    `Obras cadastradas para este número: ${nomesObras}`
+  );
+}
+
 // Interpreta o conteúdo da mensagem: tenta a IA primeiro (entende sinônimos,
 // erros de digitação, frases fora do padrão, e até áudio — o Gemini "ouve" a
 // nota de voz direto, sem transcrição separada), e cai para o parser antigo
@@ -614,6 +648,21 @@ export default async function handler(req, res) {
       mediaBufferMimeType = mimeType || midia.mimeType;
     }
 
+    // --- Saudação ou pedido de ajuda ("oi", "como funciona", "não entendi") ---
+    // Roda ANTES do bloco de "aguardando_obra" logo abaixo de propósito: sem
+    // essa prioridade, uma pessoa presa esperando responder "para qual obra é
+    // isso?" não tinha como pedir ajuda — qualquer mensagem, incluindo um
+    // pedido de ajuda, só era comparada contra os nomes de obra e devolvia
+    // "Não encontrei essa obra" para sempre. Limpa aguardando_obra para esse
+    // travamento não continuar depois desta mensagem.
+    if (waType === "text" && pedeAjudaOuSaudacao(conteudo)) {
+      if (sessao?.aguardando_obra) {
+        await upsertSessao(telefone, { aguardando_obra: false, registro_pendente_id: null });
+      }
+      await sendText(telefone, mensagemDeAjuda(obras));
+      return res.status(200).send("ajuda enviada");
+    }
+
     // --- Resposta a "para qual obra é isso?" ---
     if (sessao?.aguardando_obra && waType === "text") {
       const obraEscolhida = encontrarObraNaResposta(conteudo, obras);
@@ -646,8 +695,16 @@ export default async function handler(req, res) {
     // --- Pergunta de resumo ("quanto já foi registrado?") ---
     if (interpretacao.intencao === "resumo") {
       const sessaoValida = await obraAindaValida(sessao);
+      // Quando a empresa só tem UMA obra cadastrada, não há ambiguidade
+      // nenhuma sobre qual obra é — usamos ela direto, sem nunca perguntar
+      // "para qual obra é isso?". Antes disso, uma empresa com uma única obra
+      // caía nesse fluxo de pergunta toda vez que a sessão expirava (6h sem
+      // mensagem), inclusive para um simples "oi", travando quem só tinha
+      // aquela obra num loop sem saída (ver pedeAjudaOuSaudacao acima).
       const obraAtual =
-        interpretacao.obra || (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null);
+        interpretacao.obra ||
+        (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null) ||
+        (obras.length === 1 ? obras[0] : null);
       if (obraAtual) {
         await sendText(telefone, await resumoDaObra(obraAtual));
         return res.status(200).send("resumo enviado");
@@ -657,8 +714,16 @@ export default async function handler(req, res) {
     // --- Atualização de progresso físico ("avançamos 5%", "a obra está 60% pronta") ---
     if (interpretacao.intencao === "progresso") {
       const sessaoValida = await obraAindaValida(sessao);
+      // Quando a empresa só tem UMA obra cadastrada, não há ambiguidade
+      // nenhuma sobre qual obra é — usamos ela direto, sem nunca perguntar
+      // "para qual obra é isso?". Antes disso, uma empresa com uma única obra
+      // caía nesse fluxo de pergunta toda vez que a sessão expirava (6h sem
+      // mensagem), inclusive para um simples "oi", travando quem só tinha
+      // aquela obra num loop sem saída (ver pedeAjudaOuSaudacao acima).
       const obraAtual =
-        interpretacao.obra || (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null);
+        interpretacao.obra ||
+        (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null) ||
+        (obras.length === 1 ? obras[0] : null);
       if (obraAtual) {
         const progressoAtual = Number(obraAtual.progress) || 0;
         let novoProgresso = progressoAtual;
@@ -698,8 +763,16 @@ export default async function handler(req, res) {
     // pagamento a trabalhador) que motivou a aba existir.
     if (interpretacao.intencao === "pagamento_turma" && interpretacao.valor != null) {
       const sessaoValida = await obraAindaValida(sessao);
+      // Quando a empresa só tem UMA obra cadastrada, não há ambiguidade
+      // nenhuma sobre qual obra é — usamos ela direto, sem nunca perguntar
+      // "para qual obra é isso?". Antes disso, uma empresa com uma única obra
+      // caía nesse fluxo de pergunta toda vez que a sessão expirava (6h sem
+      // mensagem), inclusive para um simples "oi", travando quem só tinha
+      // aquela obra num loop sem saída (ver pedeAjudaOuSaudacao acima).
       const obraAtual =
-        interpretacao.obra || (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null);
+        interpretacao.obra ||
+        (sessaoValida ? obras.find((o) => o.id === sessao.obra_id) : null) ||
+        (obras.length === 1 ? obras[0] : null);
       if (obraAtual) {
         const trabalhador = interpretacao.trabalhador || "Não informado";
         try {
@@ -751,6 +824,9 @@ export default async function handler(req, res) {
     if (!obra && (await obraAindaValida(sessao))) {
       obra = obras.find((o) => o.id === sessao.obra_id) || null;
     }
+    // Mesma lógica do "sem ambiguidade" usada acima em resumo/progresso/
+    // pagamento_turma: com uma só obra cadastrada, nunca precisa perguntar.
+    if (!obra && obras.length === 1) obra = obras[0];
 
     const tipo = interpretacao.tipo;
     const valor = interpretacao.valor;
