@@ -276,16 +276,11 @@ function detectarProgresso(texto) {
 }
 
 // Detecta uma saudação pura ("oi", "bom dia"...) ou um pedido de ajuda
-// ("como funciona", "não entendi", "menu"...). Existe por dois motivos reais
-// observados em teste: (1) sem isso, um simples "oi" virava uma tentativa de
-// REGISTRO sem obra associada, e a pessoa caía direto em "para qual obra é
-// esse registro?" sem nunca ter recebido nenhuma instrução de uso; (2) uma
-// vez que a sessão fica "aguardando_obra" (ver mais abaixo), toda mensagem —
-// inclusive um pedido de ajuda — era comparada apenas contra os nomes de
-// obra cadastrados, então perguntas como "você está entendendo?" ou "me
-// ajude a usar" só repetiam "Não encontrei essa obra" para sempre, sem
-// nenhuma saída. Este detector roda ANTES da checagem de aguardando_obra
-// (mais abaixo) exatamente para poder interromper esse loop.
+// ("como funciona", "não entendi", "menu"...). Usado apenas como saída de
+// emergência quando a sessão está travada em "aguardando_obra" (ver o
+// handler mais abaixo) — fora desse estado travado, uma saudação/pergunta
+// segue normalmente para a interpretação por IA, que responde de forma
+// natural em vez de sempre devolver o mesmo menu fixo.
 const PADRAO_SAUDACAO = /^(oi+|ola|eae|e ai|opa|bom dia|boa tarde|boa noite)[\s!.]*$/;
 const PADRAO_AJUDA =
   /\b(ajuda|ajude|menu|instrucoes|instrucao|como (funciona|funciono|usar|uso|te uso|utilizar)|nao entendi|nao entendo|o que (voce|vc) faz|comandos|tutorial)\b/;
@@ -648,17 +643,20 @@ export default async function handler(req, res) {
       mediaBufferMimeType = mimeType || midia.mimeType;
     }
 
-    // --- Saudação ou pedido de ajuda ("oi", "como funciona", "não entendi") ---
-    // Roda ANTES do bloco de "aguardando_obra" logo abaixo de propósito: sem
-    // essa prioridade, uma pessoa presa esperando responder "para qual obra é
-    // isso?" não tinha como pedir ajuda — qualquer mensagem, incluindo um
-    // pedido de ajuda, só era comparada contra os nomes de obra e devolvia
-    // "Não encontrei essa obra" para sempre. Limpa aguardando_obra para esse
-    // travamento não continuar depois desta mensagem.
-    if (waType === "text" && pedeAjudaOuSaudacao(conteudo)) {
-      if (sessao?.aguardando_obra) {
-        await upsertSessao(telefone, { aguardando_obra: false, registro_pendente_id: null });
-      }
+    // --- Saída de emergência do loop "para qual obra é isso?" ---
+    // Só entra aqui quando a sessão está mesmo travada esperando resposta de
+    // obra (aguardando_obra) — é o único caso em que precisamos de uma saída
+    // garantida e fixa, não dependente da IA: sem essa prioridade, uma pessoa
+    // presa nesse estado não tinha como pedir ajuda, porque qualquer mensagem,
+    // incluindo um pedido de ajuda, só era comparada contra os nomes de obra e
+    // devolvia "Não encontrei essa obra" para sempre.
+    //
+    // Fora desse estado travado, uma saudação ou pergunta ("oi", "como
+    // funciona") NÃO é mais interceptada aqui — ela segue para a interpretação
+    // por IA logo abaixo, que responde de forma natural e conversacional em
+    // vez de sempre devolver o mesmo texto fixo de menu.
+    if (waType === "text" && sessao?.aguardando_obra && pedeAjudaOuSaudacao(conteudo)) {
+      await upsertSessao(telefone, { aguardando_obra: false, registro_pendente_id: null });
       await sendText(telefone, mensagemDeAjuda(obras));
       return res.status(200).send("ajuda enviada");
     }
