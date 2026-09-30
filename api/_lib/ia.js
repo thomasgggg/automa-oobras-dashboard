@@ -92,7 +92,9 @@ const FUNCTION_DECLARATION = {
       resposta: {
         type: "string",
         description:
-          "Uma resposta curta (1 a 2 frases), natural, cordial e em português do Brasil, para mandar de volta pelo WhatsApp confirmando o que foi entendido. Não invente números ou totais — isso é calculado à parte.",
+          "A mensagem que será mandada de volta pelo WhatsApp, em português do Brasil, com tom natural e humano — como alguém de verdade conversando, não um robô confirmando formulário. " +
+          "Quando intencao='registro', 'pagamento_turma' ou 'progresso': pode ser curta (1-2 frases), confirmando o que foi entendido, mas varie o jeito de dizer em vez de repetir sempre a mesma frase. Nunca invente números ou totais — isso é calculado à parte. " +
+          "Quando intencao='outro' (saudação, pergunta solta, dúvida sobre como usar, comentário, bate-papo em geral): responda de verdade à pessoa, como numa conversa — cumprimente, esclareça dúvidas sobre o que este assistente faz (a lista de capacidades está no início do prompt), comente, ou simplesmente converse. Não repita sempre o mesmo texto fixo de boas-vindas.",
       },
     },
     required: ["intencao", "resposta"],
@@ -150,24 +152,53 @@ async function interpretarMensagem({ texto, waType, obras, audioBuffer, audioMim
     `dela em 'trabalhador' — isso é diferente de comprar material numa loja/fornecedor, que continua ` +
     `sendo intencao='registro' com tipo='nota_fiscal'.`;
 
+  // Descrição das capacidades do assistente, usada pela IA para responder com
+  // precisão quando alguém pergunta "como funciona" / "o que você faz" (e
+  // outras conversas soltas, intencao='outro') — sem isso, a IA teria que
+  // adivinhar ou inventar o que o bot sabe fazer.
+  const capacidades =
+    `Você é o assistente de WhatsApp de uma construtora (Viga Automações), falando com alguém da obra ` +
+    `(mestre de obra, responsável, dono). Pelo WhatsApp, essa pessoa pode a qualquer momento: mandar um ` +
+    `gasto/nota fiscal (texto, foto ou áudio); contar o andamento em % da obra; avisar um pagamento feito a ` +
+    `alguém da equipe (pedreiro, servente etc.); perguntar o total já gasto/registrado; ou só mandar uma ` +
+    `foto, áudio, documento ou localização para ficar salvo no histórico da obra. Além disso — e isso é ` +
+    `importante — você também pode simplesmente conversar: responder dúvidas, bater papo, cumprimentar, ` +
+    `comentar. Você não precisa forçar toda mensagem a virar um registro.`;
+
   const instrucao = temAudio
-    ? `Mensagem de ÁUDIO recebida por WhatsApp. Ouça o áudio anexado e extraia os dados.\n\n` +
+    ? `${capacidades}\n\n` +
+      `Mensagem de ÁUDIO recebida por WhatsApp. Ouça o áudio anexado e extraia os dados (ou, se for só uma ` +
+      `conversa solta/pergunta, use intencao='outro' e responda naturalmente).\n\n` +
       `Obras cadastradas para este número: ${listaObras}\n\n` +
       blocoInstrucoesExtras +
       `${lembretes}\n\n` +
       `Analise o áudio e chame a ferramenta com os dados extraídos.`
-    : `Mensagem recebida por WhatsApp (tipo original: ${waType}):\n` +
+    : `${capacidades}\n\n` +
+      `Mensagem recebida por WhatsApp (tipo original: ${waType}):\n` +
       `"""${texto}"""\n\n` +
       `Obras cadastradas para este número: ${listaObras}\n\n` +
       blocoInstrucoesExtras +
       `${lembretes}\n\n` +
-      `Analise a mensagem e chame a ferramenta com os dados extraídos.`;
+      `Analise a mensagem e chame a ferramenta com os dados extraídos. Se for só uma conversa solta, ` +
+      `saudação ou pergunta (sem gasto, progresso ou pagamento para registrar), use intencao='outro' e ` +
+      `responda naturalmente, como numa conversa de verdade.`;
+
+  // A Meta/WhatsApp às vezes devolve o mime type do áudio com parâmetros
+  // extras (ex.: "audio/ogg; codecs=opus"), mas a API do Gemini é estrita e
+  // espera só o tipo base (ex.: "audio/ogg") — mandar o mime type "sujo"
+  // pode fazer a chamada inteira falhar (e cair silenciosamente para o
+  // parser por regras, que não consegue ler áudio nenhum). Por isso sempre
+  // limpamos aqui antes de mandar.
+  function mimeTypeBase(mime) {
+    const base = (mime || "").split(";")[0].trim().toLowerCase();
+    return base || "audio/ogg";
+  }
 
   const parts = [{ text: instrucao }];
   if (temAudio) {
     parts.push({
       inline_data: {
-        mime_type: audioMimeType || "audio/ogg",
+        mime_type: mimeTypeBase(audioMimeType),
         data: audioBuffer.toString("base64"),
       },
     });
@@ -186,7 +217,11 @@ async function interpretarMensagem({ texto, waType, obras, audioBuffer, audioMim
         tool_config: {
           function_calling_config: { mode: "ANY", allowed_function_names: [FUNCTION_DECLARATION.name] },
         },
-        generationConfig: { temperature: 0 },
+        // temperature 0 fazia toda resposta sair com o texto quase idêntico
+        // (mecânico). Um valor moderado deixa o "resposta" soar mais natural
+        // sem comprometer a confiabilidade da extração estruturada (intenção,
+        // valor, obra etc. continuam vindo do schema fixo da function call).
+        generationConfig: { temperature: 0.5 },
       }),
       signal: controller.signal,
     });
